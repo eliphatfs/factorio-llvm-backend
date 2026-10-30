@@ -1,7 +1,10 @@
 """Read LLVM IR (via llvmlite) into the compiler's small dataflow IR.
 
-M1 scope: one function, one basic block, i1/i32 values, no memory.
-Anything else raises :class:`Unsupported` with the offending instruction.
+Scope: one function of i1/i32 values, with branches, loops and fixed-size i32
+arrays (local ``alloca`` or global, see :class:`Array`). i64 is accepted and
+computed in 32 bits, since clang uses it for array indices; values that need
+more than 32 bits wrap. Anything else raises :class:`Unsupported` with the
+offending instruction.
 """
 
 from __future__ import annotations
@@ -23,20 +26,35 @@ class Unsupported(Exception):
 
 
 @dataclass(eq=False)
+class Array:
+    """A fixed-size array of i32: an ``alloca`` or a global variable."""
+
+    name: str
+    size: int
+    init: list[int]  # initial contents (zeros if none)
+    readonly: bool = False  # a constant global: becomes a ROM
+
+    def __repr__(self) -> str:
+        return f"@{self.name}[{self.size}]"
+
+
+@dataclass(eq=False)
 class Value:
     name: str
-    width: int  # 1 or 32
+    width: int  # 1 or 32; pointers are 32 (an element index into ``array``)
+    array: Array | None = None  # for pointers: the array they point into
 
     def __repr__(self) -> str:
         return f"%{self.name}:i{self.width}"
 
 
-Operand = Value | int
+Operand = Value | int | Array  # an Array operand is a pointer to its element 0
 
 
 @dataclass
 class Op:
-    opcode: str  # LLVM opcode, e.g. "add", "icmp", "select"
+    opcode: str  # LLVM opcode, e.g. "add", "icmp", "select"; "gep" (pointer, index),
+    # "load" (pointer), "store" (value, pointer), "clear" (array) are memory ops
     args: list[Operand]
     result: Value
     predicate: str | None = None  # icmp only
@@ -80,6 +98,7 @@ class Function:
     name: str
     params: list[Value]
     blocks: list[Block] = field(default_factory=list)
+    arrays: list[Array] = field(default_factory=list)
 
     @property
     def straight_line(self) -> bool:
@@ -98,14 +117,16 @@ class Function:
         return term.value
 
 
-_WIDTHS = {"i1": 1, "i32": 32}
+_WIDTHS = {"i1": 1, "i8": 32, "i32": 32, "i64": 32, "ptr": 32}
 
 
 def _width(ty: str, where: str) -> int:
+    if ty == "i8":
+        raise Unsupported(f"type i8 is not supported yet: {where}")
     try:
         return _WIDTHS[ty]
     except KeyError:
-        raise Unsupported(f"type {ty} is not supported yet (only i1 and i32): {where}") from None
+        raise Unsupported(f"type {ty} is not supported yet (only i1, i32, i64 and pointers to arrays): {where}") from None
 
 
 def _key(v) -> int:
@@ -116,6 +137,34 @@ _ICMP = re.compile(r"\bicmp\s+(\w+)")
 _INTRINSIC = re.compile(r"@llvm\.(\w+)\.i\d+\(")
 INTRINSICS = {"smax", "smin", "umax", "umin", "abs"}
 _CASE = re.compile(r"i\d+ (-?\d+), label")
+_GLOBAL = re.compile(r"^@([\w.$-]+) = .*?\b(global|constant) (\[(\d+) x i32\]|i32) (.*?)(?:, align \d+)?$")
+_ALLOCA = re.compile(r"alloca (\[(\d+) x i32\]|i32)(?=,|$)")
+_GEP = re.compile(r"getelementptr (?:inbounds |nuw |nusw )*(\[\d+ x i32\]|i32|i8), ptr")
+_CONST_GEP = re.compile(r"ptr getelementptr (?:inbounds |nuw |nusw )*\(\[\d+ x i32\], ptr @([\w.$-]+), i64 0, i64 (\d+)\)")
+_MEMSET = re.compile(r"@llvm\.memset\.")
+_SKIPPED_CALLS = re.compile(r"@llvm\.(lifetime|assume|dbg)\.")
+
+
+def _global_array(text: str) -> Array | None:
+    m = _GLOBAL.match(text)
+    if not m:
+        return None
+    name, kind, ty, n, init_text = m.groups()
+    size = int(n) if n else 1
+    if init_text.startswith("zeroinitializer"):
+        init = [0] * size
+    elif n:
+        init = [wrap(int(x)) for x in re.findall(r"i32 (-?\d+)", init_text)]
+    else:
+        init = [wrap(int(init_text.split()[0]))]
+    if len(init) != size:
+        raise Unsupported(f"global initializer: {text}")
+    return Array(name, size, init, readonly=kind == "constant")
+
+
+def _check_whole_array(arr: Array, nbytes: int, where: str) -> None:
+    if nbytes != 4 * arr.size:
+        raise Unsupported(f"memset of part of an array: {where}")
 
 
 def read_function(ir_text: str, name: str | None = None) -> Function:
@@ -131,6 +180,12 @@ def read_function(ir_text: str, name: str | None = None) -> Function:
 
     values: dict[int, Value] = {}
     counter = iter(range(1 << 30))
+    arrays: dict[int, Array] = {}  # alloca instruction -> array
+    globals_: dict[str, Array] = {}
+    for g in module.global_variables:
+        arr = _global_array(str(g).strip())
+        if arr is not None:
+            globals_[g.name] = arr
 
     def fresh(ref, where: str) -> Value:
         v = Value(ref.name or str(next(counter)), _width(str(ref.type), where))
@@ -138,6 +193,10 @@ def read_function(ir_text: str, name: str | None = None) -> Function:
         return v
 
     params = [fresh(a, f"argument of @{fn.name}") for a in fn.arguments]
+    if any(str(a.type) == "i64" for a in fn.arguments):
+        raise Unsupported(f"i64 arguments are not supported (i64 is only for array indices): @{fn.name}")
+    if any(str(a.type) == "ptr" for a in fn.arguments):
+        raise Unsupported(f"pointer arguments are not supported (use a global or local array): @{fn.name}")
     out = Function(fn.name, params)
 
     blocks = list(fn.blocks)
@@ -148,10 +207,30 @@ def read_function(ir_text: str, name: str | None = None) -> Function:
     # Name every result first: phis may refer to values defined later.
     for b in blocks:
         for ins in b.instructions:
-            if ins.opcode not in ("br", "switch", "ret", "store", "unreachable") and str(ins.type) != "void":
-                fresh(ins, str(ins).strip())
+            text = str(ins).strip()
+            if ins.opcode == "alloca":
+                m = _ALLOCA.search(text)
+                if not m:
+                    raise Unsupported(f"only i32 and [N x i32] locals are supported: {text}")
+                n = int(m.group(2)) if m.group(2) else 1
+                arrays[_key(ins)] = Array(ins.name or f"local{len(arrays)}", n, [0] * n)
+            elif ins.opcode not in ("br", "switch", "ret", "store", "unreachable") and str(ins.type) != "void":
+                fresh(ins, text)
 
     def operand(ref, where: str) -> Operand:
+        if _key(ref) in arrays:
+            return arrays[_key(ref)]
+        if str(ref.type) == "ptr" and ref.is_constant:
+            if ref.name in globals_:
+                return globals_[ref.name]
+            m = _CONST_GEP.fullmatch(str(ref).strip())
+            if m and m.group(1) in globals_:
+                # A constant element pointer: a gep at the point of use.
+                arr = globals_[m.group(1)]
+                p = Value(f"{arr.name}.{m.group(2)}", 32, arr)
+                out.blocks[-1].ops.append(Op("gep", [arr, int(m.group(2))], p, text=str(ref).strip()))
+                return p
+            raise Unsupported(f"pointer {ref}: {where}")
         if ref.is_constant:
             if str(ref.type) not in _WIDTHS:
                 raise Unsupported(f"constant of type {ref.type}: {where}")
@@ -193,8 +272,29 @@ def read_function(ir_text: str, name: str | None = None) -> Function:
             if opc == "ret":
                 if len(refs) != 1:
                     raise Unsupported(f"void return: {text}")
+                if str(refs[0].type) != "i32" and str(refs[0].type) != "i1":
+                    raise Unsupported(f"only i32 and i1 results are supported: {text}")
                 block.term = Term("ret", value=operand(refs[0], text), text=text)
                 break
+            if opc == "alloca":
+                continue
+            if opc == "call" and _SKIPPED_CALLS.search(text):
+                continue
+            if opc == "call" and _MEMSET.search(text):
+                dst, val, size = (operand(r, text) for r in refs[:3])
+                if not isinstance(dst, Array) or val != 0 or not isinstance(size, int):
+                    raise Unsupported(f"only memset of a whole array to 0 is supported: {text}")
+                _check_whole_array(dst, size, text)
+                block.ops.append(Op("clear", [dst], Value(f"clear{next(counter)}", 0), text=text))
+                continue
+            if opc == "store":
+                block.ops.append(
+                    Op("store", [operand(refs[0], text), operand(refs[1], text)], Value(f"store{next(counter)}", 0), text=text)
+                )
+                continue
+            if opc == "getelementptr":
+                block.ops.append(Op("gep", _gep_args(text, [operand(r, text) for r in refs]), values[_key(ins)], text=text))
+                continue
             if opc == "call":
                 m = _INTRINSIC.search(text)
                 if not m or m.group(1) not in INTRINSICS:
@@ -210,7 +310,89 @@ def read_function(ir_text: str, name: str | None = None) -> Function:
             out.blocks[-1].ops.append(Op(opc, [operand(o, text) for o in refs], values[_key(ins)], pred, text))
         if block.term is None:
             raise Unsupported(f"block {block.name} has an unsupported terminator")
-    return out
+    used = {id(a): a for a in [*arrays.values(), *globals_.values()]}
+    out.arrays = [a for a in used.values() if _mentions(out, a)]
+    _point_to_arrays(out)
+    return split_after_stores(out)
+
+
+def _gep_args(text: str, ops: list[Operand]) -> list[Operand]:
+    """(base pointer, element index) of a getelementptr over i32 elements."""
+    m = _GEP.search(text)
+    if not m:
+        raise Unsupported(f"only getelementptr over i32 arrays is supported: {text}")
+    ty, base, idx = m.group(1), ops[0], ops[1:]
+    if ty.startswith("[") and len(idx) == 2 and idx[0] == 0:
+        return [base, idx[1]]
+    if ty == "i32" and len(idx) == 1:
+        return [base, idx[0]]
+    if ty == "i8" and len(idx) == 1 and isinstance(idx[0], int) and idx[0] % 4 == 0:
+        return [base, idx[0] // 4]
+    raise Unsupported(f"getelementptr form not supported: {text}")
+
+
+def _mentions(fn: Function, arr: Array) -> bool:
+    return any(a is arr for b in fn.blocks for op in b.ops for a in op.args) or any(
+        v is arr for b in fn.blocks for p in b.phis for _, v in p.incoming
+    )
+
+
+def _point_to_arrays(fn: Function) -> None:
+    """Work out which array every pointer value points into."""
+
+    def array_of(v: Operand) -> Array | None:
+        if isinstance(v, Array):
+            return v
+        return v.array if isinstance(v, Value) else None
+
+    changed = True
+    while changed:
+        changed = False
+        for b in fn.blocks:
+            found: list[tuple[Value, list[Operand]]] = [(p.result, [v for _, v in p.incoming]) for p in b.phis]
+            found += [(op.result, op.args[:1]) for op in b.ops if op.opcode == "gep"]
+            for result, sources in found:
+                arrs = {id(a): a for a in map(array_of, sources) if a is not None}
+                if len(arrs) > 1:
+                    raise Unsupported(f"%{result.name} may point into different arrays")
+                if arrs and result.array is None:
+                    result.array = next(iter(arrs.values()))
+                    changed = True
+    for b in fn.blocks:
+        for op in b.ops:
+            ptr = op.args[0] if op.opcode in ("gep", "load") else op.args[1] if op.opcode == "store" else None
+            if ptr is not None and array_of(ptr) is None:
+                raise Unsupported(f"pointer does not point into a known array: {op.text}")
+
+
+def split_after_stores(fn: Function) -> Function:
+    """End a block after each store or clear, so later loads see the new contents.
+
+    The block keeps its name for the part that runs first (branches go there);
+    successors' phis are told about the part that now ends with the terminator.
+    """
+    renamed: dict[str, str] = {}
+    blocks: list[Block] = []
+    for b in fn.blocks:
+        piece = Block(b.name, b.phis)
+        n = 0
+        for i, op in enumerate(b.ops):
+            piece.ops.append(op)
+            if op.opcode in ("store", "clear") and i + 1 < len(b.ops):
+                n += 1
+                nxt = Block(f"{b.name}.{n}")
+                piece.term = Term("br", [nxt.name], text=f"br label %{nxt.name}  ; after {op.text}")
+                blocks.append(piece)
+                piece = nxt
+        piece.term = b.term
+        blocks.append(piece)
+        if piece.name != b.name:
+            renamed[b.name] = piece.name
+    for b in blocks:
+        for p in b.phis:
+            p.incoming = [(renamed.get(pred, pred), v) for pred, v in p.incoming]
+    fn.blocks = blocks
+    return fn
 
 
 # Keep clang from producing what the circuit cannot run cheaply: vector code,
