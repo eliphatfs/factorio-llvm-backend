@@ -85,12 +85,46 @@ class Jump:
 
 
 @dataclass
+class Load:
+    """While S is in the block's steps, drive ``address`` onto read port ``port``."""
+
+    array: str
+    port: int
+    address: Lowered
+    source: str = ""
+
+    def __str__(self) -> str:
+        return f"read {self.array}[{_show(self.address, self.source)}] on port {self.port}"
+
+
+@dataclass
+class Store:
+    """At ``step``, write ``value`` to ``array[address]``; with ``clear``, zero the array."""
+
+    step: int
+    array: str
+    array_id: int
+    address: Lowered = 0
+    value: Lowered = 0
+    clear: bool = False
+    sources: tuple[str, str] = ("", "")
+
+    def __str__(self) -> str:
+        if self.clear:
+            return f"@{self.step}  clear {self.array}"
+        a, v = self.sources
+        return f"@{self.step}  {self.array}[{_show(self.address, a)}] <- {_show(self.value, v)}"
+
+
+@dataclass
 class BlockSchedule:
     name: str
     base: int  # first step
     depth: int  # ticks for the block's kept values to settle
     writes: list[Write] = field(default_factory=list)
     jumps: list[Jump] = field(default_factory=list)
+    loads: list[Load] = field(default_factory=list)
+    stores: list[Store] = field(default_factory=list)
 
     @property
     def gate(self) -> int:
@@ -102,7 +136,8 @@ class BlockSchedule:
 
     def __str__(self) -> str:
         lines = [f"block {self.name}  steps {self.base}..{self.jump}  (depth {self.depth})"]
-        lines += [f"  {x}" for x in (*self.writes, *self.jumps)]
+        lines += [f"  @{self.base}..{self.jump}  {x}" for x in self.loads]
+        lines += [f"  {x}" for x in (*self.writes, *self.stores, *self.jumps)]
         return "\n".join(lines)
 
 

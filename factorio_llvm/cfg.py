@@ -25,16 +25,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .frontend import Block, Function, Operand, Unsupported, Value
+from .frontend import Array, Block, Function, Op, Operand, Unsupported, Value
 from .lower import PRIVATE_CONSTANT, Lowered, Wire, _Builder, _colors, _depth, _Lowerer, _operand
 from .netlist import GREEN, RED, Arithmetic, Cond, Connector, Constant, Decider, Net, Netlist, Out, Sig
-from .schedule import GATE_TO_LATCH, BlockSchedule, Jump, Register, Schedule, Test, Write
+from .memory import ADDRESS, ENABLE, VALUE, Memory, Ptr
+from .schedule import GATE_TO_LATCH, BlockSchedule, Jump, Load, Register, Schedule, Store, Test, Write
 from .signals import EACH
 from .sim import Simulator, wrap
 
 STEP = "signal-S"
 RESET = "signal-R"
 HALT = "<halt>"  # jump target name for the halt step
+# Reset holds S at 1, so the program starts at 2: nothing fires while in reset.
+FIRST_STEP = 2
 
 
 @dataclass
@@ -78,18 +81,55 @@ class _CfgLowerer(_Lowerer):
         self.def_block: dict[int, str] = {}
         self.writes = self.b.nl.net(GREEN, "register writes")
         self.registers: list[Register] = []
+        self.mem = Memory(self.b, self.step, fn.arrays) if fn.arrays else None
+        self.loads: list[Load] = []  # the current block's, while lowering it
+        self.stores: list[Store] = []
 
     # values: block-local combinators first, then registers and arguments
-    def get(self, a: Operand) -> Lowered:
+    def get(self, a: Operand):
         if isinstance(a, int):
             return a
+        if isinstance(a, Array):
+            return Ptr(a, 0)
         if id(a) in self.local:
             return self.local[id(a)]
         if id(a) in self.regs:
-            return Wire(self.regs[id(a)].signal, 0, RED)
+            w = Wire(self.regs[id(a)].signal, 0, RED)
+            return Ptr(a.array, w) if a.array is not None else w
         return self.env[id(a)]
 
-    def set(self, v: Value, x: Lowered) -> None:
+    def op(self, op: Op):
+        if op.opcode == "gep":
+            base, idx = (self.get(x) for x in op.args)
+            assert isinstance(base, Ptr)
+            index = idx if base.index == 0 else self.arith("+", base.index, idx, op.text)
+            return Ptr(base.array, index)
+        if op.opcode == "load":
+            assert self.mem is not None
+            ptr = self.get(op.args[0])
+            port = sum(1 for x in self.loads if x.array == ptr.array.name)
+            self.loads.append(Load(ptr.array.name, port, ptr.index, _name(op.args[0])))
+            return self.mem.load_result(ptr.array, port, ptr.index, op.text)
+        if op.opcode == "store":
+            assert self.mem is not None
+            value, ptr = (self.get(x) for x in op.args)
+            if isinstance(value, Ptr):
+                raise Unsupported(f"storing a pointer: {op.text}")
+            if ptr.array.readonly:
+                raise Unsupported(f"store to a constant: {op.text}")
+            bank = self.mem.bank(ptr.array)
+            names = (_name(op.args[1]), _name(op.args[0]))
+            self.stores.append(Store(0, ptr.array.name, bank.id, ptr.index, value, sources=names))
+            return 0
+        if op.opcode == "clear":
+            assert self.mem is not None
+            arr = op.args[0]
+            assert isinstance(arr, Array)
+            self.stores.append(Store(0, arr.name, self.mem.bank(arr).id, clear=True))
+            return 0
+        return super().op(op)
+
+    def set(self, v: Value, x) -> None:
         self.local[id(v)] = x
         if isinstance(x, Wire):
             self.names.setdefault(v.name, x.signal)
@@ -143,19 +183,40 @@ class _CfgLowerer(_Lowerer):
         dec = Decider(conds, [Out(self.step, copy=False, constant=j.delta)], label=j.label)
         self.b.place(dec, _colors(*(t.value for t in j.tests)) | {RED}, RED)
 
-    def _emit_write(self, w: Write) -> None:
-        """A gate samples the value at its step; an ``x + 0`` renames it onto the write net."""
-        v, r = w.value, w.register
+    def _pass(self, conds: list[Cond], v: Lowered, signal: str, net: Net, label: str) -> None:
+        """While ``conds`` hold, a gate passes ``v``; an ``x + 0`` renames it to ``signal`` on ``net``."""
         if isinstance(v, int):
             out, picked = Out(PRIVATE_CONSTANT, copy=False, constant=v), PRIVATE_CONSTANT
         else:
             out, picked = Out(v.signal, networks=v.color), v.signal
-        gate = Decider([self._step_is(w.step)], [out], label=f"{w.label} (write at {w.step})")
-        private = self.b.nl.net(GREEN, f"write {r.signal} at {w.step}")
+        gate = Decider(conds, [out], label=label)
+        private = self.b.nl.net(GREEN, f"{label} (private)")
         self.b.place(gate, _colors(v) | {RED}, private)
-        rename = Arithmetic(Sig(picked, frozenset({GREEN})), "+", 0, r.signal, label=f"{w.label} (rename)")
+        rename = Arithmetic(Sig(picked, frozenset({GREEN})), "+", 0, signal, label=f"{label} (rename)")
         private.attach(rename.inp)
-        self.b.place(rename, (), self.writes)
+        self.b.place(rename, (), net)
+
+    def _emit_write(self, w: Write) -> None:
+        self._pass([self._step_is(w.step)], w.value, w.register.signal, self.writes, f"{w.label} (write at {w.step})")
+
+    def _emit_store(self, st: Store) -> None:
+        at = [self._step_is(st.step)]
+        if st.clear:
+            self._pass(at, -st.array_id, ENABLE, self.b.bus, f"clear {st.array}")
+            return
+        label = f"store {st.array} at {st.step}"
+        for v, sig in ((st.address, ADDRESS), (st.value, VALUE), (st.array_id, ENABLE)):
+            if v != 0:
+                self._pass(at, v, sig, self.b.bus, f"{label} ({sig})")
+
+    def _emit_load(self, ld: Load, bs: BlockSchedule) -> None:
+        assert self.mem is not None
+        if ld.address == 0:
+            return  # an absent address reads word 0
+        s = Sig(self.step, frozenset({RED}))
+        window = [Cond(s, ">=", bs.base), Cond(s, "<=", bs.jump)]
+        arr = next(a for a in self.fn.arrays if a.name == ld.array)
+        self._pass(window, ld.address, ADDRESS, self.mem.port(arr, ld.port).address, f"{bs.name}: {ld}")
 
     def _emit_register(self, r: Register, latch_steps: list[int]) -> None:
         if not latch_steps:
@@ -202,14 +263,16 @@ class _CfgLowerer(_Lowerer):
         lowered: dict[str, dict[int, Lowered]] = {}
         nets: dict[str, Net] = {}
         sched: list[BlockSchedule] = []
-        k = 1
+        k = FIRST_STEP
         for b in self.fn.blocks:
             nets[b.name] = self.b.begin_block(b.name)
-            self.local = {}
+            self.local, self.loads, self.stores = {}, [], []
             for op in b.ops:
                 self.set(op.result, self.op(op))
             lowered[b.name] = self.local
-            bs = BlockSchedule(b.name, k, self._block_depth(b))
+            bs = BlockSchedule(b.name, k, self._block_depth(b), loads=self.loads, stores=self.stores)
+            for st in bs.stores:
+                st.step = bs.gate
             sched.append(bs)
             k = bs.jump + 1
         schedule = Schedule(sched, self.registers, result, halt=k)
@@ -234,10 +297,16 @@ class _CfgLowerer(_Lowerer):
             self.b.local, self.b.group = nets[bs.name], bs.name
             for w in bs.writes:
                 self._emit_write(w)
+            for st in bs.stores:
+                self._emit_store(st)
+            for ld in bs.loads:
+                self._emit_load(ld, bs)
             for j in bs.jumps:
                 self._emit_jump(j)
         for r in self.registers:
             self._emit_register(r, schedule.latch_steps(r))
+        if self.mem is not None:
+            self.mem.build()
         halt = schedule.halt
 
         # Halt: hold S at the halt step by cancelling the counter's +1.
@@ -273,11 +342,14 @@ class _CfgLowerer(_Lowerer):
         for succ in t.targets + [d for _, d in t.cases]:
             for p in self._block(succ).phis:
                 needed += [self.get(v) for pred, v in p.incoming if pred == b.name]
-        return _depth(*needed)
+        for st in self.stores:
+            needed += [st.address, st.value]
+        return _depth(*(x.index if isinstance(x, Ptr) else x for x in needed))
 
     def _keep(self, bs: BlockSchedule, r: Register, v: Operand, label: str) -> None:
         if not any(w.register is r for w in bs.writes):
-            bs.writes.append(Write(bs.gate, self.get(v), r, label, _name(v)))
+            x = self.get(v)
+            bs.writes.append(Write(bs.gate, x.index if isinstance(x, Ptr) else x, r, label, _name(v)))
 
     def _plan_terminator(self, b: Block, bs: BlockSchedule, schedule: Schedule) -> None:
         t = b.term

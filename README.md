@@ -9,7 +9,7 @@ signal name is the register number. The milestones are M0 infrastructure, M1 str
 
 ## Status
 
-M0 (infrastructure), M1 (straight-line functions) and M2 (control flow) are in place:
+M0 (infrastructure), M1 (straight-line functions), M2 (control flow) and M3 (arrays) are in place:
 
 | Module | What it does |
 | --- | --- |
@@ -21,6 +21,7 @@ M0 (infrastructure), M1 (straight-line functions) and M2 (control flow) are in p
 | `factorio_llvm/frontend.py` | Reads LLVM IR with llvmlite (or C via clang) into a small dataflow IR |
 | `factorio_llvm/lower.py` | Lowers a single-block i32 function to a combinator pipeline |
 | `factorio_llvm/cfg.py` | Lowers functions with branches and loops to a stepped circuit |
+| `factorio_llvm/memory.py` | Arrays: a held cell per word, shared read ports, writes as bus pulses |
 | `factorio_llvm/schedule.py` | The step schedule: per block, its steps, register writes and jumps (`--schedule` prints it) |
 | `factorio_llvm/layout.py` | Places combinators in substation cells and routes nets as wires |
 
@@ -45,7 +46,15 @@ are placed with the `RESET` constant combinator switched on, which holds `S` at
 C is compiled with `clang -O2` plus flags that stop vectorisation, unrolling
 and closed-form loop exit values (`factorio_llvm.frontend.CLANG_FLAGS`).
 
-Next: M3 adds memory (arrays in RAM banks, `load`/`store`).
+M3 supports fixed-size `i32` arrays: local (`alloca`) or global, with or
+without initial values, and constant globals as ROM tables. `getelementptr`,
+`load`, `store` and `memset` of a whole array to 0 are handled; i64 is accepted
+for indices and computed in 32 bits. Each word is one decider holding its value
+on a private loop; each read port adds a reader per word, and a load costs 4
+ticks on top of its address. Blocks are split after every store, so a store
+takes effect before the next load. Memory is cleared (or reset to its initial
+values) while `RESET` is on. Not supported: pointer arguments, pointers that
+may point into different arrays, other element types, `memcpy`.
 
 ## Usage
 

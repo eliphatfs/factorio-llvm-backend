@@ -296,7 +296,7 @@ class _Lowerer:
             return self.pick(x, "<", 0, self.arith("-", 0, x, f"{label} (negate)"), x, label)
         if opc == "select":
             return self.select(args[0], args[1], args[2], label)
-        if opc in ("zext", "freeze") or (opc == "trunc" and widths[0] == op.result.width):
+        if opc in ("zext", "freeze") or (opc in ("trunc", "sext") and widths[0] == op.result.width):
             return args[0]
         if opc == "sext" and widths[0] == 1:
             return self.arith("*", args[0], -1, label)
@@ -331,7 +331,7 @@ class _Lowerer:
 
 def lower(fn: Function):
     """Compile ``fn``: a pipeline if it is one block, else a stepped circuit (M2)."""
-    if fn.straight_line:
+    if fn.straight_line and not fn.arrays:
         return _Lowerer(fn).run()
     from .cfg import lower_cfg
 
