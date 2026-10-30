@@ -76,14 +76,19 @@ class Compiled:
 class _Builder:
     def __init__(self) -> None:
         self.nl = Netlist()
-        self._free = iter(allocatable_signals())
+        self._free = list(reversed(allocatable_signals()))
         self._bus_tail: Connector | None = None
 
     def signal(self) -> str:
         try:
-            return next(self._free)
-        except StopIteration:
+            return self._free.pop()
+        except IndexError:
             raise Unsupported("ran out of signals: the function has too many values for one bus") from None
+
+    def reserve(self, name: str) -> str:
+        """Take a specific signal, for readability (e.g. S for the step counter)."""
+        self._free.remove(name)
+        return name
 
     def _on_bus(self, *conns: Connector) -> None:
         for c in conns:
@@ -181,6 +186,27 @@ class _Lowerer:
         self.b.nl.wire(GREEN, gate.out, rename.inp)
         return Wire(out, _depth(a, b, t, f) + 2)
 
+    def uge(self, a: Lowered, b: Lowered, label: str) -> Lowered:
+        fa = self.arith("XOR", a, INT_MIN, f"{label} (flip a)")
+        fb = self.arith("XOR", b, INT_MIN, f"{label} (flip b)")
+        return self.compare(">=", fa, fb, f"{label} (uge)")
+
+    def udiv(self, a: Lowered, b: Lowered, label: str) -> Lowered:
+        """Unsigned division from signed operations (b != 0)."""
+        if isinstance(a, int) and isinstance(b, int):
+            return wrap((a & 0xFFFFFFFF) // (b & 0xFFFFFFFF))
+        # b >= 2^31: the quotient is 0 or 1.
+        big = self.uge(a, b, f"{label} (b huge)")
+        # a < 2^31, b < 2^31: plain signed division.
+        small = self.arith("/", a, b, f"{label} (a small)")
+        # a >= 2^31: halve a, divide, double, then correct by at most one.
+        half = self.arith("AND", self.arith(">>", a, 1, f"{label} (a/2)"), 0x7FFFFFFF, f"{label} (a/2 mask)")
+        q = self.arith("<<", self.arith("/", half, b, f"{label} (a/2/b)"), 1, f"{label} (2q)")
+        r = self.arith("-", a, self.arith("*", q, b, f"{label} (2q*b)"), f"{label} (r)")
+        q = self.arith("+", q, self.uge(r, b, f"{label} (r >= b)"), f"{label} (q fix)")
+        pos = self.pick(a, "<", 0, q, small, f"{label} (a sign)")
+        return self.pick(b, "<", 0, big, pos, label)
+
     # ---- instructions
 
     def op(self, op: Op) -> Lowered:
@@ -192,6 +218,12 @@ class _Lowerer:
             if op.result.width == 1 and opc not in _I1_BINOPS:
                 raise Unsupported(f"i1 arithmetic: {label}")
             return self.arith(_BINOPS[opc], args[0], args[1], label)
+        if opc in ("udiv", "urem"):
+            a, b = args
+            q = self.udiv(a, b, label)
+            if opc == "udiv":
+                return q
+            return self.arith("-", a, self.arith("*", q, b, f"{label} (q*b)"), label)
         if opc == "lshr":
             x, n = args
             if isinstance(n, int):
@@ -266,5 +298,10 @@ class _Lowerer:
         )
 
 
-def lower(fn: Function) -> Compiled:
-    return _Lowerer(fn).run()
+def lower(fn: Function):
+    """Compile ``fn``: a pipeline if it is one block, else a stepped circuit (M2)."""
+    if fn.straight_line:
+        return _Lowerer(fn).run()
+    from .cfg import lower_cfg
+
+    return lower_cfg(fn)

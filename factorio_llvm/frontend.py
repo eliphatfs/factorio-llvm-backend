@@ -44,11 +44,58 @@ class Op:
 
 
 @dataclass
+class Phi:
+    result: Value
+    incoming: list[tuple[str, Operand]]  # (predecessor block name, value)
+    text: str = ""
+
+
+@dataclass
+class Term:
+    """A block terminator.
+
+    kind "br": ``targets[0]``. kind "condbr": ``cond ? targets[0] : targets[1]``.
+    kind "switch": ``cases`` (value, block) with ``targets[0]`` as the default.
+    kind "ret": returns ``value``.
+    """
+
+    kind: str
+    targets: list[str] = field(default_factory=list)
+    cond: Operand | None = None
+    cases: list[tuple[int, str]] = field(default_factory=list)
+    value: Operand | None = None
+    text: str = ""
+
+
+@dataclass
+class Block:
+    name: str
+    phis: list[Phi] = field(default_factory=list)
+    ops: list[Op] = field(default_factory=list)
+    term: Term | None = None
+
+
+@dataclass
 class Function:
     name: str
     params: list[Value]
-    ops: list[Op] = field(default_factory=list)
-    ret: Operand | None = None
+    blocks: list[Block] = field(default_factory=list)
+
+    @property
+    def straight_line(self) -> bool:
+        return len(self.blocks) == 1
+
+    @property
+    def ops(self) -> list[Op]:
+        assert self.straight_line
+        return self.blocks[0].ops
+
+    @property
+    def ret(self) -> Operand | None:
+        assert self.straight_line
+        term = self.blocks[0].term
+        assert term is not None
+        return term.value
 
 
 _WIDTHS = {"i1": 1, "i32": 32}
@@ -68,6 +115,7 @@ def _key(v) -> int:
 _ICMP = re.compile(r"\bicmp\s+(\w+)")
 _INTRINSIC = re.compile(r"@llvm\.(\w+)\.i\d+\(")
 INTRINSICS = {"smax", "smin", "umax", "umin", "abs"}
+_CASE = re.compile(r"i\d+ (-?\d+), label")
 
 
 _ATTR_GROUP = re.compile(r"^attributes #\d+ = .*$", re.M)
@@ -106,8 +154,15 @@ def read_function(ir_text: str, name: str | None = None) -> Function:
     out = Function(fn.name, params)
 
     blocks = list(fn.blocks)
-    if len(blocks) != 1:
-        raise Unsupported(f"@{fn.name} has {len(blocks)} basic blocks; control flow comes in M2")
+    block_names: dict[int, str] = {}
+    for i, b in enumerate(blocks):
+        block_names[_key(b)] = b.name or f"bb{i}"
+
+    # Name every result first: phis may refer to values defined later.
+    for b in blocks:
+        for ins in b.instructions:
+            if ins.opcode not in ("br", "switch", "ret", "store", "unreachable") and str(ins.type) != "void":
+                fresh(ins, str(ins).strip())
 
     def operand(ref, where: str) -> Operand:
         if ref.is_constant:
@@ -121,32 +176,65 @@ def read_function(ir_text: str, name: str | None = None) -> Function:
         try:
             return values[_key(ref)]
         except KeyError:
-            raise Unsupported(f"operand {ref} is not an argument or earlier result: {where}") from None
+            raise Unsupported(f"operand {ref} is not an argument or instruction result: {where}") from None
 
-    for ins in blocks[0].instructions:
-        text = str(ins).strip()
-        opc = ins.opcode
-        refs = list(ins.operands)
-        if opc == "call":
-            m = _INTRINSIC.search(text)
-            if not m or m.group(1) not in INTRINSICS:
-                raise Unsupported(f"calls are not supported yet (inline them): {text}")
-            opc, refs = m.group(1), refs[:-1]  # the last operand is the callee
-        args = [operand(o, text) for o in refs]
-        if opc == "ret":
-            if len(args) != 1:
-                raise Unsupported(f"void return: {text}")
-            out.ret = args[0]
-            break
-        pred = None
-        if opc == "icmp":
-            m = _ICMP.search(text)
-            assert m, text
-            pred = m.group(1)
-        out.ops.append(Op(opc, args, fresh(ins, text), pred, text))
-    else:
-        raise Unsupported(f"@{fn.name} does not end in ret")
+    def target(ref) -> str:
+        return block_names[_key(ref)]
+
+    for b in blocks:
+        block = Block(block_names[_key(b)])
+        out.blocks.append(block)
+        for ins in b.instructions:
+            text = str(ins).strip()
+            opc = ins.opcode
+            refs = list(ins.operands)
+            if opc == "phi":
+                incoming = [(target(bb), operand(v, text)) for v, bb in zip(refs, ins.incoming_blocks)]
+                block.phis.append(Phi(values[_key(ins)], incoming, text))
+                continue
+            if opc == "br":
+                if len(refs) == 1:
+                    block.term = Term("br", [target(refs[0])], text=text)
+                else:  # operands are cond, false target, true target
+                    block.term = Term("condbr", [target(refs[2]), target(refs[1])], operand(refs[0], text), text=text)
+                break
+            if opc == "switch":
+                vals = [int(v) for v in _CASE.findall(text)]
+                dests = [target(r) for r in refs[2:]]
+                block.term = Term("switch", [target(refs[1])], operand(refs[0], text), list(zip(vals, dests)), text=text)
+                break
+            if opc == "ret":
+                if len(refs) != 1:
+                    raise Unsupported(f"void return: {text}")
+                block.term = Term("ret", value=operand(refs[0], text), text=text)
+                break
+            if opc == "call":
+                m = _INTRINSIC.search(text)
+                if not m or m.group(1) not in INTRINSICS:
+                    raise Unsupported(f"calls are not supported yet (inline them): {text}")
+                opc, refs = m.group(1), refs[:-1]  # the last operand is the callee
+            pred = None
+            if opc == "icmp":
+                m = _ICMP.search(text)
+                assert m, text
+                pred = m.group(1)
+            if _key(ins) not in values:
+                raise Unsupported(f"instruction not supported yet: {text}")
+            out.blocks[-1].ops.append(Op(opc, [operand(o, text) for o in refs], values[_key(ins)], pred, text))
+        if block.term is None:
+            raise Unsupported(f"block {block.name} has an unsupported terminator")
     return out
+
+
+# Keep clang from producing what the circuit cannot run cheaply: vector code,
+# unrolled loops, and loop exit values rewritten as wide closed forms (i33/i64).
+CLANG_FLAGS = [
+    "-fno-vectorize",
+    "-fno-slp-vectorize",
+    "-fno-unroll-loops",
+    "-mllvm",
+    "-replexitval=never",
+]
 
 
 def compile_c(source: str | Path, *, opt: str = "-O2") -> str:
@@ -154,8 +242,7 @@ def compile_c(source: str | Path, *, opt: str = "-O2") -> str:
     clang = shutil.which("clang")
     if clang is None:
         raise RuntimeError("clang not found on PATH")
+    base = [clang, opt, *CLANG_FLAGS, "-S", "-emit-llvm", "-fno-discard-value-names", "-o", "-"]
     if isinstance(source, Path) or (isinstance(source, str) and source.endswith(".c") and Path(source).exists()):
-        cmd = [clang, opt, "-S", "-emit-llvm", "-fno-discard-value-names", "-o", "-", str(source)]
-        return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
-    cmd = [clang, opt, "-S", "-emit-llvm", "-fno-discard-value-names", "-x", "c", "-o", "-", "-"]
-    return subprocess.run(cmd, input=source, check=True, capture_output=True, text=True).stdout
+        return subprocess.run([*base, str(source)], check=True, capture_output=True, text=True).stdout
+    return subprocess.run([*base, "-x", "c", "-"], input=source, check=True, capture_output=True, text=True).stdout

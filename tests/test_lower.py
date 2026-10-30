@@ -86,9 +86,9 @@ def test_constant_result_needs_no_combinators():
     assert c.result == 42 and c.latency == 0
 
 
-def test_control_flow_is_rejected():
-    ir = compile_c("int f(int a) { int s = 0; for (int i = 0; i < a; i++) s += i * i; return s; }")
-    with pytest.raises(Unsupported, match="basic blocks"):
+def test_unsupported_types_are_rejected():
+    ir = compile_c("long long f(long long a) { return a * 3; }")
+    with pytest.raises(Unsupported, match="i64"):
         read_function(ir)
 
 

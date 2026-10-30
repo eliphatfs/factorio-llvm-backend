@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from .blueprint import export_string
+from .cfg import SteppedCompiled
 from .frontend import Unsupported, compile_c, read_function
 from .lower import lower
 
@@ -30,13 +31,23 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     n = len(compiled.netlist.entities)
-    print(f"@{compiled.function}: {n} combinators, latency {compiled.latency} ticks", file=sys.stderr)
+    stepped = isinstance(compiled, SteppedCompiled)
+    if stepped:
+        print(f"@{compiled.function}: {n} combinators, halts when S = {compiled.halt}", file=sys.stderr)
+    else:
+        print(f"@{compiled.function}: {n} combinators, latency {compiled.latency} ticks", file=sys.stderr)
     for c, s in zip(compiled.params, compiled.param_signals):
         print(f"  {c.label} -> {s}", file=sys.stderr)
-    if not isinstance(compiled.result, int):
+    if stepped:
+        print(f"  result -> {compiled.result} (valid once S = {compiled.halt})", file=sys.stderr)
+    elif not isinstance(compiled.result, int):
         print(f"  result -> {compiled.result.signal}", file=sys.stderr)
     if ns.args is not None:
-        print(f"  simulated result: {compiled.run(*ns.args)}", file=sys.stderr)
+        value = compiled.run(*ns.args)
+        took = f" after {compiled.last_ticks} ticks" if stepped else ""
+        print(f"  simulated result: {value}{took}", file=sys.stderr)
+    if stepped:
+        compiled.reset.enabled = True  # place it held in reset; switch off to run
     if not ns.no_blueprint:
         print(export_string(compiled.netlist, f"@{compiled.function}"))
     return 0
