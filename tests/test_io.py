@@ -100,3 +100,19 @@ def test_screen_shows_pixels(ir):
         want = ((x * 32) << 16 | (y * 32) << 8 | 0x40) if (x + y + 1) & 1 else 0
         assert sim.color(by_pos[lamp.position]) == want, (x, y)
     assert sim.message(by_pos[pos[id(c.status)]]) == "done"
+
+
+def test_main_is_the_default_and_may_return_void():
+    ir = compile_c(
+        "extern volatile int in[1]; extern volatile int out[1];\n"
+        "int helper(int x) { return x * 2; }\n"
+        "void main(void) { while (!in[0]); out[0] = helper(in[0]); }\n"
+    )
+    c = lower(read_function(ir))
+    assert c.function == "main"
+    c.reset.enabled = False
+    c.inputs.signals = {"signal-0": 21}
+    sim = Simulator(c.netlist)
+    sim.run_until(lambda s: s.read(c.output, DONE, [RED]) == 1, 10_000)
+    sim.step(3)
+    assert sim.network(c.output, RED) == {DONE: 1, "signal-0": 42}
