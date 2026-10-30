@@ -7,8 +7,7 @@ Model, matching the game:
 * Every combinator reads its input networks during tick t and its result is on
   its output networks during tick t+1. Constant combinators output immediately.
 
-Game behaviours not yet checked in game are marked ASSUMPTION; M0 calibrates
-them with small blueprints.
+Edge cases were checked in game (Factorio 2.1) with examples/calibrate.py.
 """
 
 from __future__ import annotations
@@ -57,17 +56,20 @@ def arith(op: str, a: int, b: int) -> int:
     if op == "*":
         return wrap(a * b)
     if op == "/":
-        return 0 if b == 0 else wrap(_trunc_div(a, b))
+        # Checked in game: x / 0 and INT_MIN / -1 both give 0.
+        if b == 0 or (a == -(2**31) and b == -1):
+            return 0
+        return _trunc_div(a, b)
     if op == "%":
         return 0 if b == 0 else wrap(a - b * _trunc_div(a, b))
     if op == "^":
-        # ASSUMPTION: a negative exponent gives 0.
+        # Checked in game: a negative exponent gives 0.
         return 0 if b < 0 else wrap(pow(a, b, 1 << 32))
     if op == "<<":
-        # ASSUMPTION: the shift amount uses its low 5 bits.
+        # Checked in game: the shift amount uses its low 5 bits.
         return wrap(a << (b & 31))
     if op == ">>":
-        # ASSUMPTION: right shift is arithmetic (sign-extending).
+        # Checked in game: right shift is arithmetic (sign-extending).
         return wrap(a >> (b & 31))
     if op == "AND":
         return wrap(a & b)

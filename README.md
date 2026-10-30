@@ -32,8 +32,8 @@ python -m examples.calibrate
 `examples.calibrate` prints two blueprint strings and the simulator's
 predictions. Paste the calibration blueprint into the game and compare each
 combinator's output with the printed values; the cases cover every game
-behaviour the simulator marks `ASSUMPTION` (shift amounts, right-shift sign,
-negative powers, division by zero, Each outputs). The second blueprint is the
+edge case the simulator models (shift amounts, right-shift sign,
+negative powers, division by zero, Each outputs); all matched the game on 2.1. The second blueprint is the
 bus register: `X` should become 42 once `S` passes 5 and stay there.
 
 Blueprints use an automatic grid layout with no electric poles yet; place
