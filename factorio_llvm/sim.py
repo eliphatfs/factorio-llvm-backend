@@ -260,7 +260,13 @@ class Simulator:
     def network(self, connector: Connector, color: Color) -> Signals:
         """The signals on the network attached to ``connector`` this tick."""
         net = self.net_of.get((connector, color))
-        return dict(self._nets.get(net, {})) if net is not None else {}
+        if net is None:
+            # A fully unwired output connector still carries its own output (once, on red).
+            unwired = all((connector, c) not in self.net_of for c in (RED, GREEN))
+            if unwired and connector.side == "out" and color == RED:
+                return self.output(connector.entity)
+            return {}
+        return dict(self._nets.get(net, {}))
 
     def read(self, connector: Connector, name: str, networks: Iterable[Color] = BOTH) -> int:
         return wrap(sum(self.network(connector, c).get(name, 0) for c in networks))

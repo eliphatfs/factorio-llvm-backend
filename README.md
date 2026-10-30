@@ -9,7 +9,7 @@ signal name is the register number. The milestones are M0 infrastructure, M1 str
 
 ## Status
 
-M0 (infrastructure) is in place:
+M0 (infrastructure) and M1 (straight-line functions) are in place:
 
 | Module | What it does |
 | --- | --- |
@@ -18,16 +18,32 @@ M0 (infrastructure) is in place:
 | `factorio_llvm/blueprint.py` | Blueprint string export and import |
 | `factorio_llvm/components.py` | Step counter and bus register building blocks |
 | `factorio_llvm/signals.py` | The 395 base-game signals, from Factorio 2.1.24 |
+| `factorio_llvm/frontend.py` | Reads LLVM IR with llvmlite (or C via clang) into a small dataflow IR |
+| `factorio_llvm/lower.py` | Lowers a single-block i32 function to a combinator pipeline |
 
-Next: M1 compiles straight-line i32 functions from LLVM IR (via llvmlite).
+M1 supports one basic block of i1/i32 code: `add sub mul sdiv srem shl ashr lshr
+and or xor`, every `icmp` predicate, `select`, `zext/sext/trunc` between i1 and
+i32, and the `smax smin umax umin abs` intrinsics. Every value gets its own
+signal on one red bus, so a function can have at most 395 values. Tests compare
+the simulated circuit with the same C compiled natively.
+
+Next: M2 adds control flow (the step counter `S`, bus registers, phi, branches
+and loops).
 
 ## Usage
 
 ```
 pip install -e '.[dev]'
 pytest
+python -m factorio_llvm examples/m1.c -f mix --args 6 7
 python -m examples.calibrate
 ```
+
+`python -m factorio_llvm` prints the combinator count, latency, which signal
+holds each argument and the result, and the simulated result on stderr, and the
+blueprint on stdout. The blueprint's constant combinators hold the `--args`
+values; change them in game and the result signal follows after `latency`
+ticks.
 
 `examples.calibrate` prints two blueprint strings and the simulator's
 predictions. Paste the calibration blueprint into the game and compare each
