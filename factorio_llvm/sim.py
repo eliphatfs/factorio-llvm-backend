@@ -28,6 +28,7 @@ from .netlist import (
     Entity,
     Netlist,
     Out,
+    Pole,
     Sig,
 )
 from .signals import ANYTHING, EACH, EVERYTHING
@@ -238,7 +239,7 @@ class Simulator:
                     new[id(e)] = eval_arithmetic(e, self._inputs(e))
                 elif isinstance(e, Decider):
                     new[id(e)] = eval_decider(e, self._inputs(e))
-                elif isinstance(e, Constant):
+                elif isinstance(e, (Constant, Pole)):
                     new[id(e)] = {}
                 else:
                     raise TypeError(f"cannot simulate {type(e).__name__}")

@@ -21,11 +21,14 @@ M0 (infrastructure), M1 (straight-line functions) and M2 (control flow) are in p
 | `factorio_llvm/frontend.py` | Reads LLVM IR with llvmlite (or C via clang) into a small dataflow IR |
 | `factorio_llvm/lower.py` | Lowers a single-block i32 function to a combinator pipeline |
 | `factorio_llvm/cfg.py` | Lowers functions with branches and loops to a stepped circuit |
+| `factorio_llvm/layout.py` | Places combinators in substation cells and routes nets as wires |
 
 M1 supports one basic block of i1/i32 code: `add sub mul sdiv srem shl ashr lshr
 and or xor`, every `icmp` predicate, `select`, `zext/sext/trunc` between i1 and
-i32, and the `smax smin umax umin abs` intrinsics. Every value gets its own
-signal on one red bus, so a function can have at most 395 values. Tests compare
+i32, and the `smax smin umax umin abs` intrinsics. Values are named per basic block on
+the block's own green net; only registers, arguments and the step signal share
+the red bus. So the 395-signal limit applies to one block, and to the number of
+values kept across blocks, not to the whole function. Tests compare
 the simulated circuit with the same C compiled natively.
 
 `udiv`/`urem` are built from signed operations.
@@ -66,5 +69,9 @@ edge case the simulator models (shift amounts, right-shift sign,
 negative powers, division by zero, Each outputs); all matched the game on 2.1. The second blueprint is the
 bus register: `X` should become 42 once `S` passes 5 and stay there.
 
-Blueprints use an automatic grid layout with no electric poles yet; place
-them where they get power.
+Blueprints are laid out in 12x12 cells, each powered by a substation at its
+centre. Combinators of one basic block sit together. Each net becomes a minimum
+spanning tree; an edge longer than the 9-tile combinator reach goes through
+substations (18-tile reach), and since a substation joins everything on one
+colour, each carries at most one red and one green net. Spare substation sites
+in each cell are built only when routing needs them.

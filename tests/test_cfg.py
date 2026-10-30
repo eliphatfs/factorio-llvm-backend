@@ -7,6 +7,9 @@ import subprocess
 
 import pytest
 
+from factorio_llvm.layout import check_reach
+from factorio_llvm.netlist import Pole
+
 from factorio_llvm.blueprint import export_string, import_string
 from factorio_llvm.cfg import STEP
 from factorio_llvm.frontend import CLANG_FLAGS, compile_c, read_function
@@ -91,8 +94,10 @@ def test_blueprint_round_trip(ir):
     c = lower(read_function(ir, "gcd"))
     c.run(84, 36)  # bakes the arguments into the constant combinators
     back = import_string(export_string(c.netlist))
+    assert any(isinstance(e, Pole) for e in back.entities)
+    assert check_reach(back) == []
     sim = Simulator(back)
-    bus = back.entities[-1].out
+    bus = next(e for e in back.entities if e.position == c.bus.entity.position).out
     sim.run_until(lambda s: s.read(bus, STEP) == c.halt)
     sim.step()
     assert sim.read(bus, c.result) == 12
@@ -125,3 +130,27 @@ def test_reset_holds_and_reruns(ir):
     sim.run_until(lambda s: s.read(c.bus, STEP) == c.halt)
     sim.step()
     assert sim.read(c.bus, c.result) == 6
+
+
+def test_large_program_is_laid_out_and_routed(tmp_path):
+    # Four blocks of ~270 values each: more than the 395 signals one net can
+    # name, so this needs the per-block local nets and substation relays.
+    lines = ["int big(int a, int b) { int x = a, y = b;"]
+    for blk in range(4):
+        lines.append(f"if (x > {blk}) {{")
+        for i in range(45):
+            lines.append(f"x = x * {i % 7 + 3} ^ (y + {i}); y = y + (x >> {i % 5 + 1});")
+        lines.append("} else { y = y - x; }")
+    lines.append("return x + y; }")
+    src = tmp_path / "big.c"
+    src.write_text("\n".join(lines))
+    c = lower(read_function(compile_c(src), "big"))
+    assert len(c.netlist.entities) > 900
+    want = c.run(5, 7)
+    back = import_string(export_string(c.netlist))
+    assert check_reach(back) == []
+    sim = Simulator(back)
+    bus = next(e for e in back.entities if e.position == c.bus.entity.position).out
+    sim.run_until(lambda s: s.read(bus, STEP) == c.halt)
+    sim.step()
+    assert sim.read(bus, c.result) == want

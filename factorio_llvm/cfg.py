@@ -11,8 +11,10 @@ Each basic block owns a range of steps:
 Values used only inside their block are read straight from their combinator.
 A value used in another block, and every phi, lives in a bus register, so it is
 stable for the whole of every later block. A register is one decider; each
-write to it adds a gate decider, and one ``Each + 0`` renames whatever the
-active gate passes to the register's signal.
+write to it adds a gate decider and an ``x + 0`` that renames the gated value to
+the register's signal. The renames all drive one shared green write net, which
+every register reads, so a register needs no wiring of its own beyond the bus
+and that net.
 
 Branches add a constant to ``S`` (signals on a wire sum), so a jump costs one
 decider per target. ``ret`` writes the result register and jumps to the halt
@@ -24,8 +26,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .frontend import Block, Function, Operand, Unsupported, Value
-from .lower import Lowered, Wire, _Builder, _depth, _Lowerer, _operand
-from .netlist import GREEN, RED, Arithmetic, Cond, Connector, Constant, Decider, Out, Sig
+from .lower import PRIVATE_CONSTANT, Lowered, Wire, _Builder, _colors, _depth, _Lowerer, _operand
+from .netlist import GREEN, RED, Arithmetic, Cond, Connector, Constant, Decider, Net, Netlist, Out, Sig
 from .signals import EACH
 from .sim import Simulator, wrap
 
@@ -37,13 +39,13 @@ GATE_TO_LATCH = 2  # ticks from the gate sampling a value to the register latchi
 @dataclass
 class _Register:
     signal: str
-    ports: list[tuple[int, Lowered]] = field(default_factory=list)  # (gate step, value)
+    steps: set[int] = field(default_factory=set)  # gate steps
 
 
 @dataclass
 class SteppedCompiled:
     function: str
-    netlist: object
+    netlist: Netlist
     params: list[Constant]
     param_signals: list[str]
     result: str
@@ -78,6 +80,7 @@ class _CfgLowerer(_Lowerer):
         self.local: dict[int, Lowered] = {}
         self.regs: dict[int, _Register] = {}  # value id -> register
         self.def_block: dict[int, str] = {}
+        self.writes = self.b.nl.net(GREEN, "register writes")
 
     # values: block-local combinators first, then registers and arguments
     def get(self, a: Operand) -> Lowered:
@@ -86,7 +89,7 @@ class _CfgLowerer(_Lowerer):
         if id(a) in self.local:
             return self.local[id(a)]
         if id(a) in self.regs:
-            return Wire(self.regs[id(a)].signal, 0)
+            return Wire(self.regs[id(a)].signal, 0, RED)
         return self.env[id(a)]
 
     def set(self, v: Value, x: Lowered) -> None:
@@ -94,9 +97,13 @@ class _CfgLowerer(_Lowerer):
         if isinstance(x, Wire):
             self.names.setdefault(v.name, x.signal)
 
+    def _new_register(self) -> _Register:
+        sig = self.b.signal()
+        return _Register(sig)
+
     def _register(self, v: Value) -> _Register:
         if id(v) not in self.regs:
-            r = _Register(self.b.signal())
+            r = self._new_register()
             self.regs[id(v)] = r
             self.names[v.name] = r.signal
         return self.regs[id(v)]
@@ -131,63 +138,75 @@ class _CfgLowerer(_Lowerer):
     def _step_is(self, k: int) -> Cond:
         return Cond(Sig(self.step, frozenset({RED})), "=", k)
 
-    def _jump(self, conds: list[Cond], delta: int, label: str) -> None:
+    def _jump(self, conds: list[Cond], delta: int, label: str, reads: set) -> None:
         if delta != 0:
-            self.b.place(Decider(conds, [Out(self.step, copy=False, constant=delta)], label=label))
+            dec = Decider(conds, [Out(self.step, copy=False, constant=delta)], label=label)
+            self.b.place(dec, reads | {RED}, RED)
+
+    def _write(self, r: _Register, step: int, v: Lowered, label: str) -> None:
+        """A gate in the current block: at ``step`` it passes ``v`` towards register ``r``."""
+        if step in r.steps:
+            return
+        r.steps.add(step)
+        if isinstance(v, int):
+            out, picked = Out(PRIVATE_CONSTANT, copy=False, constant=v), PRIVATE_CONSTANT
+        else:
+            out, picked = Out(v.signal, networks=v.color), v.signal
+        gate = Decider([self._step_is(step)], [out], label=f"{label} (write at {step})")
+        private = self.b.nl.net(GREEN, f"write {r.signal} at {step}")
+        self.b.place(gate, _colors(v) | {RED}, private)
+        rename = Arithmetic(Sig(picked, frozenset({GREEN})), "+", 0, r.signal, label=f"{label} (rename)")
+        private.attach(rename.inp)
+        self.b.place(rename, (), self.writes)
 
     def _emit_register(self, r: _Register, label: str) -> None:
-        if not r.ports:
+        if not r.steps:
             return
-        rename = Arithmetic(Sig(EACH, frozenset({GREEN})), "+", 0, r.signal, label=f"{label} (rename)")
-        latch_steps = sorted({k + GATE_TO_LATCH for k, _ in r.ports})
+        latch_steps = sorted(k + GATE_TO_LATCH for k in r.steps)
         reg = Decider(
             [Cond(Sig(self.step, frozenset({RED})), "=", k, join="or") for k in latch_steps],
             [Out(r.signal, networks=GREEN)],
             [Out(r.signal, networks=RED)],
             label=label,
         )
-        self.b.place(reg)
-        self.b.nl.add(rename)
-        self.b.nl.wire(GREEN, rename.out, reg.inp)
-        for k, v in r.ports:
-            if isinstance(v, int):
-                out = Out(self.b.signal(), copy=False, constant=v)
-            else:
-                out = Out(v.signal, networks=RED)
-            gate = self.b.place(Decider([self._step_is(k)], [out], label=f"{label} (write at {k})"), bus_out=False)
-            self.b.nl.wire(GREEN, gate.out, rename.inp)
+        self.b.place(reg, (RED,), RED, group=f"register {r.signal}")
+        self.writes.attach(reg.inp)
 
     def run(self) -> SteppedCompiled:
         self._plan_registers()
 
+        self.b.group = "control"
         # Counter: S starts at 1 and rises by 1 a tick; jumps add to it.
-        self.b.place(Constant({self.step: 1}, label="step counter increment"), bus_in=False)
-        self.b.place(Arithmetic(Sig(self.step, frozenset({RED})), "+", 0, self.step, label="step counter S"))
+        self.b.place(Constant({self.step: 1}, label="step counter increment"), (), RED)
+        self.b.place(Arithmetic(Sig(self.step, frozenset({RED})), "+", 0, self.step, label="step counter S"), (RED,), RED)
         # Reset: while this constant is on, S * R = -S cancels the count and S
         # stays at 1. Blueprints are placed with it on; turn it off to run.
         reset_signal = self.b.reserve(RESET)
-        reset = self.b.place(Constant({reset_signal: -1}, label="RESET: turn off to run"), bus_in=False)
-        assert isinstance(reset, Constant)
+        reset = self.b.place(Constant({reset_signal: -1}, label="RESET: turn off to run"), (), RED)
         self.b.place(
             Arithmetic(
                 Sig(self.step, frozenset({RED})), "*", Sig(reset_signal, frozenset({RED})), self.step, label="reset"
-            )
+            ),
+            (RED,),
+            RED,
         )
 
         params, param_signals = [], []
         for p in self.fn.params:
             s = self.b.signal()
-            params.append(self.b.place(Constant({}, label=f"argument %{p.name}")))
+            params.append(self.b.place(Constant({}, label=f"argument %{p.name}"), (), RED, group="arguments"))
             param_signals.append(s)
-            self.env[id(p)] = Wire(s, 0)
+            self.env[id(p)] = Wire(s, 0, RED)
             self.names[p.name] = s
 
-        result = _Register(self.b.signal())
+        result = self._new_register()
 
         # Pass 1: combinators of every block, and each block's settle depth.
         lowered: dict[str, dict[int, Lowered]] = {}
+        nets: dict[str, Net] = {}
         depth: dict[str, int] = {}
         for b in self.fn.blocks:
+            nets[b.name] = self.b.begin_block(b.name)
             self.local = {}
             for op in b.ops:
                 self.set(op.result, self.op(op))
@@ -206,21 +225,19 @@ class _CfgLowerer(_Lowerer):
         # Pass 2: register writes and jumps.
         for b in self.fn.blocks:
             self.local = lowered[b.name]
+            self.b.local, self.b.group = nets[b.name], b.name
             base, jump = steps[b.name]
             gate = jump - GATE_TO_LATCH
             for op in b.ops:
                 if id(op.result) in self.regs:
-                    self.regs[id(op.result)].ports.append((gate, self.local[id(op.result)]))
+                    self._write(self.regs[id(op.result)], gate, self.local[id(op.result)], f"keep %{op.result.name}")
             t = b.term
             assert t is not None
             for succ in t.targets + [d for _, d in t.cases]:
                 for p in self._block(succ).phis:
                     for pred, v in p.incoming:
                         if pred == b.name:
-                            port = (gate, self.get(v))
-                            r = self.regs[id(p.result)]
-                            if port not in r.ports:
-                                r.ports.append(port)
+                            self._write(self.regs[id(p.result)], gate, self.get(v), p.text)
             self._emit_terminator(b, steps, jump, result, gate, halt)
 
         for b in self.fn.blocks:
@@ -232,13 +249,15 @@ class _CfgLowerer(_Lowerer):
         self._emit_register(result, "return value")
 
         # Halt: hold S at the halt step by cancelling the counter's +1.
-        self.b.place(Decider([Cond(Sig(self.step, frozenset({RED})), ">=", halt)], [Out(self.step, copy=False, constant=-1)], label="halt"))
+        halt_dec = Decider([self._ge(halt)], [Out(self.step, copy=False, constant=-1)], label="halt")
+        self.b.place(halt_dec, (RED,), RED, group="control")
 
-        bus = self.b.bus
-        assert bus is not None
         return SteppedCompiled(
-            self.fn.name, self.b.nl, params, param_signals, result.signal, halt, bus, steps, self.names, reset
+            self.fn.name, self.b.nl, params, param_signals, result.signal, halt, self.b.bus.probe, steps, self.names, reset
         )
+
+    def _ge(self, k: int) -> Cond:
+        return Cond(Sig(self.step, frozenset({RED})), ">=", k)
 
     def _block(self, name: str) -> Block:
         for b in self.fn.blocks:
@@ -274,27 +293,30 @@ class _CfgLowerer(_Lowerer):
         label = f"{b.name}: {t.text.splitlines()[0]}"
         if t.kind == "ret":
             assert t.value is not None
-            result.ports.append((gate, self.get(t.value)))
-            self._jump([at], halt - nxt, label)
+            self._write(result, gate, self.get(t.value), "return value")
+            self._jump([at], halt - nxt, label, set())
         elif t.kind == "br":
-            self._jump([at], delta(t.targets[0]), label)
+            self._jump([at], delta(t.targets[0]), label, set())
         elif t.kind == "condbr":
             c = self.get(t.cond)
             if isinstance(c, int):
-                self._jump([at], delta(t.targets[0] if c else t.targets[1]), label)
+                self._jump([at], delta(t.targets[0] if c else t.targets[1]), label, set())
             else:
-                self._jump([at, Cond(_operand(c), "!=", 0)], delta(t.targets[0]), f"{label} (true)")
-                self._jump([at, Cond(_operand(c), "=", 0)], delta(t.targets[1]), f"{label} (false)")
+                self._jump([at, Cond(_operand(c), "!=", 0)], delta(t.targets[0]), f"{label} (true)", _colors(c))
+                self._jump([at, Cond(_operand(c), "=", 0)], delta(t.targets[1]), f"{label} (false)", _colors(c))
         elif t.kind == "switch":
             c = self.get(t.cond)
             if isinstance(c, int):
                 dest = dict(t.cases).get(c, t.targets[0])
-                self._jump([at], delta(dest), label)
+                self._jump([at], delta(dest), label, set())
                 return
             for val, dest in t.cases:
-                self._jump([at, Cond(_operand(c), "=", val)], delta(dest), f"{label} (case {val})")
+                self._jump([at, Cond(_operand(c), "=", val)], delta(dest), f"{label} (case {val})", _colors(c))
             self._jump(
-                [at] + [Cond(_operand(c), "!=", val) for val, _ in t.cases], delta(t.targets[0]), f"{label} (default)"
+                [at] + [Cond(_operand(c), "!=", val) for val, _ in t.cases],
+                delta(t.targets[0]),
+                f"{label} (default)",
+                _colors(c),
             )
         else:
             raise Unsupported(f"terminator {t.kind}")

@@ -70,6 +70,7 @@ def sig(name: str, networks: Iterable[Color] | Color | None = None) -> Sig:
 class Entity:
     label: str = field(default="", kw_only=True)
     position: tuple[float, float] | None = field(default=None, kw_only=True)
+    group: str = field(default="", kw_only=True)  # layout keeps a group together
 
     has_input = True
 
@@ -101,6 +102,13 @@ class Constant(Entity):
             if name in WILDCARDS:
                 raise ValueError("a constant combinator cannot output a wildcard")
             signal_type(name)
+
+
+@dataclass(eq=False)
+class Pole(Entity):
+    """A substation: carries red and green wires (and power), computes nothing."""
+
+    has_input = False
 
 
 @dataclass(eq=False)
@@ -210,10 +218,41 @@ class WireSeg:
     b: Connector
 
 
+class Net:
+    """A logical circuit network: connectors to join, before layout picks wires."""
+
+    def __init__(self, color: Color, name: str) -> None:
+        self.color = Color(color)
+        self.name = name
+        self.members: list[Connector] = []
+
+    def attach(self, *conns: Connector) -> None:
+        for c in conns:
+            if c not in self.members:
+                self.members.append(c)
+
+    @property
+    def probe(self) -> Connector:
+        """A connector on this net, for reading it in the simulator."""
+        if not self.members:
+            raise ValueError(f"net {self.name} has no members")
+        return self.members[0]
+
+    def __repr__(self) -> str:
+        return f"Net({self.color.value} {self.name}, {len(self.members)} members)"
+
+
 class Netlist:
     def __init__(self) -> None:
         self.entities: list[Entity] = []
         self.wires: list[WireSeg] = []
+        self.logical: list[Net] = []
+
+    def net(self, color: Color, name: str = "") -> Net:
+        """Declare a logical net; layout turns it into wires (see layout.py)."""
+        n = Net(color, name or f"net{len(self.logical)}")
+        self.logical.append(n)
+        return n
 
     def add(self, entity: Entity) -> Entity:
         if any(e is entity for e in self.entities):
@@ -244,10 +283,16 @@ class Netlist:
                 x = parent[x]
             return x
 
-        for w in self.wires:
-            ra, rb = find((w.a, w.color)), find((w.b, w.color))
+        def union(a, b) -> None:
+            ra, rb = find(a), find(b)
             if ra != rb:
                 parent[ra] = rb
+
+        for w in self.wires:
+            union((w.a, w.color), (w.b, w.color))
+        for n in self.logical:
+            for c in n.members:
+                union((n.members[0], n.color), (c, n.color))
         ids: dict[tuple[Connector, Color], int] = {}
         roots: dict[tuple[Connector, Color], int] = {}
         for key in list(parent):

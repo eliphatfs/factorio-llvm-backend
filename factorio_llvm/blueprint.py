@@ -23,6 +23,7 @@ from .netlist import (
     Constant,
     Decider,
     Entity,
+    Pole,
     Netlist,
     Out,
     Sig,
@@ -115,6 +116,8 @@ def _control_behavior(e: Entity) -> dict[str, Any]:
                 "output_signal": _signal(e.output),
             }
         }
+    if isinstance(e, Pole):
+        return {}
     if isinstance(e, Decider):
         dc: dict[str, Any] = {
             "conditions": [_cond(i, c) for i, c in enumerate(e.conditions)],
@@ -126,7 +129,7 @@ def _control_behavior(e: Entity) -> dict[str, Any]:
     raise TypeError(type(e).__name__)
 
 
-_PROTOTYPE = {Constant: "constant-combinator", Arithmetic: "arithmetic-combinator", Decider: "decider-combinator"}
+_PROTOTYPE = {Pole: "substation", Constant: "constant-combinator", Arithmetic: "arithmetic-combinator", Decider: "decider-combinator"}
 
 
 def _position(e: Entity, slot: int) -> tuple[float, float]:
@@ -141,13 +144,17 @@ def _position(e: Entity, slot: int) -> tuple[float, float]:
 
 
 def _connector_id(c: Connector, color: Color) -> int:
-    if isinstance(c.entity, Constant):
+    if isinstance(c.entity, (Constant, Pole)):
         return 1 if color == RED else 2
     base = 1 if c.side == "in" else 3
     return base + (0 if color == RED else 1)
 
 
 def to_blueprint(netlist: Netlist, label: str = "factorio-llvm") -> dict[str, Any]:
+    if netlist.logical:
+        from .layout import physical
+
+        netlist = physical(netlist)
     numbers: dict[int, int] = {}
     entities = []
     for slot, e in enumerate(netlist.entities):
@@ -158,8 +165,9 @@ def to_blueprint(netlist: Netlist, label: str = "factorio-llvm") -> dict[str, An
             "entity_number": n,
             "name": _PROTOTYPE[type(e)],
             "position": {"x": x, "y": y},
-            "control_behavior": _control_behavior(e),
         }
+        if not isinstance(e, Pole):
+            ent["control_behavior"] = _control_behavior(e)
         if e.label:
             ent["player_description"] = e.label
         entities.append(ent)
@@ -254,13 +262,15 @@ def from_blueprint(obj: dict[str, Any]) -> Netlist:
     by_number: dict[int, Entity] = {}
     for d in bp.get("entities", []):
         if d["name"] in ("medium-electric-pole", "small-electric-pole", "substation", "big-electric-pole"):
-            raise ValueError("electric poles in imported blueprints are not supported yet")
+            pos = (float(d["position"]["x"]), float(d["position"]["y"]))
+            by_number[d["entity_number"]] = nl.add(Pole(label=d["name"], position=pos))
+            continue
         by_number[d["entity_number"]] = nl.add(_entity_in(d))
 
     def conn(n: int, cid: int) -> tuple[Connector, Color]:
         e = by_number[n]
         color = RED if cid in (1, 3) else GREEN
-        side = "out" if isinstance(e, Constant) or cid in (3, 4) else "in"
+        side = "out" if isinstance(e, (Constant, Pole)) or cid in (3, 4) else "in"
         return Connector(e, side), color
 
     for a, ca, b, cb in bp.get("wires", []):
