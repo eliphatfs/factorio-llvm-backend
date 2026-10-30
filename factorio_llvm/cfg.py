@@ -23,23 +23,18 @@ step, where a decider holds ``S`` still.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .frontend import Block, Function, Operand, Unsupported, Value
 from .lower import PRIVATE_CONSTANT, Lowered, Wire, _Builder, _colors, _depth, _Lowerer, _operand
 from .netlist import GREEN, RED, Arithmetic, Cond, Connector, Constant, Decider, Net, Netlist, Out, Sig
+from .schedule import GATE_TO_LATCH, BlockSchedule, Jump, Register, Schedule, Test, Write
 from .signals import EACH
 from .sim import Simulator, wrap
 
 STEP = "signal-S"
 RESET = "signal-R"
-GATE_TO_LATCH = 2  # ticks from the gate sampling a value to the register latching it
-
-
-@dataclass
-class _Register:
-    signal: str
-    steps: set[int] = field(default_factory=set)  # gate steps
+HALT = "<halt>"  # jump target name for the halt step
 
 
 @dataclass
@@ -54,6 +49,7 @@ class SteppedCompiled:
     blocks: dict[str, tuple[int, int]]  # block -> (base step, jump step)
     signals: dict[str, str]
     reset: Constant
+    schedule: Schedule
     last_ticks: int = 0
 
     @property
@@ -78,9 +74,10 @@ class _CfgLowerer(_Lowerer):
         super().__init__(fn)
         self.step = self.b.reserve(STEP)
         self.local: dict[int, Lowered] = {}
-        self.regs: dict[int, _Register] = {}  # value id -> register
+        self.regs: dict[int, Register] = {}  # value id -> register
         self.def_block: dict[int, str] = {}
         self.writes = self.b.nl.net(GREEN, "register writes")
+        self.registers: list[Register] = []
 
     # values: block-local combinators first, then registers and arguments
     def get(self, a: Operand) -> Lowered:
@@ -97,13 +94,14 @@ class _CfgLowerer(_Lowerer):
         if isinstance(x, Wire):
             self.names.setdefault(v.name, x.signal)
 
-    def _new_register(self) -> _Register:
-        sig = self.b.signal()
-        return _Register(sig)
+    def _new_register(self, label: str) -> Register:
+        r = Register(self.b.signal(), label)
+        self.registers.append(r)
+        return r
 
-    def _register(self, v: Value) -> _Register:
+    def _register(self, v: Value) -> Register:
         if id(v) not in self.regs:
-            r = self._new_register()
+            r = self._new_register(f"%{v.name}")
             self.regs[id(v)] = r
             self.names[v.name] = r.signal
         return self.regs[id(v)]
@@ -138,36 +136,35 @@ class _CfgLowerer(_Lowerer):
     def _step_is(self, k: int) -> Cond:
         return Cond(Sig(self.step, frozenset({RED})), "=", k)
 
-    def _jump(self, conds: list[Cond], delta: int, label: str, reads: set) -> None:
-        if delta != 0:
-            dec = Decider(conds, [Out(self.step, copy=False, constant=delta)], label=label)
-            self.b.place(dec, reads | {RED}, RED)
-
-    def _write(self, r: _Register, step: int, v: Lowered, label: str) -> None:
-        """A gate in the current block: at ``step`` it passes ``v`` towards register ``r``."""
-        if step in r.steps:
+    def _emit_jump(self, j: Jump) -> None:
+        if j.delta == 0:
             return
-        r.steps.add(step)
+        conds = [self._step_is(j.step)] + [Cond(_operand(t.value), t.cmp, t.constant) for t in j.tests]
+        dec = Decider(conds, [Out(self.step, copy=False, constant=j.delta)], label=j.label)
+        self.b.place(dec, _colors(*(t.value for t in j.tests)) | {RED}, RED)
+
+    def _emit_write(self, w: Write) -> None:
+        """A gate samples the value at its step; an ``x + 0`` renames it onto the write net."""
+        v, r = w.value, w.register
         if isinstance(v, int):
             out, picked = Out(PRIVATE_CONSTANT, copy=False, constant=v), PRIVATE_CONSTANT
         else:
             out, picked = Out(v.signal, networks=v.color), v.signal
-        gate = Decider([self._step_is(step)], [out], label=f"{label} (write at {step})")
-        private = self.b.nl.net(GREEN, f"write {r.signal} at {step}")
+        gate = Decider([self._step_is(w.step)], [out], label=f"{w.label} (write at {w.step})")
+        private = self.b.nl.net(GREEN, f"write {r.signal} at {w.step}")
         self.b.place(gate, _colors(v) | {RED}, private)
-        rename = Arithmetic(Sig(picked, frozenset({GREEN})), "+", 0, r.signal, label=f"{label} (rename)")
+        rename = Arithmetic(Sig(picked, frozenset({GREEN})), "+", 0, r.signal, label=f"{w.label} (rename)")
         private.attach(rename.inp)
         self.b.place(rename, (), self.writes)
 
-    def _emit_register(self, r: _Register, label: str) -> None:
-        if not r.steps:
+    def _emit_register(self, r: Register, latch_steps: list[int]) -> None:
+        if not latch_steps:
             return
-        latch_steps = sorted(k + GATE_TO_LATCH for k in r.steps)
         reg = Decider(
             [Cond(Sig(self.step, frozenset({RED})), "=", k, join="or") for k in latch_steps],
             [Out(r.signal, networks=GREEN)],
             [Out(r.signal, networks=RED)],
-            label=label,
+            label=str(r),
         )
         self.b.place(reg, (RED,), RED, group=f"register {r.signal}")
         self.writes.attach(reg.inp)
@@ -199,61 +196,58 @@ class _CfgLowerer(_Lowerer):
             self.env[id(p)] = Wire(s, 0, RED)
             self.names[p.name] = s
 
-        result = self._new_register()
+        result = self._new_register("return value")
 
         # Pass 1: combinators of every block, and each block's settle depth.
         lowered: dict[str, dict[int, Lowered]] = {}
         nets: dict[str, Net] = {}
-        depth: dict[str, int] = {}
+        sched: list[BlockSchedule] = []
+        k = 1
         for b in self.fn.blocks:
             nets[b.name] = self.b.begin_block(b.name)
             self.local = {}
             for op in b.ops:
                 self.set(op.result, self.op(op))
             lowered[b.name] = self.local
-            depth[b.name] = self._block_depth(b)
+            bs = BlockSchedule(b.name, k, self._block_depth(b))
+            sched.append(bs)
+            k = bs.jump + 1
+        schedule = Schedule(sched, self.registers, result, halt=k)
 
-        # Steps.
-        steps: dict[str, tuple[int, int]] = {}
-        k = 1
-        for b in self.fn.blocks:
-            e = k + depth[b.name]
-            steps[b.name] = (k, e + GATE_TO_LATCH)
-            k = e + GATE_TO_LATCH + 1
-        halt = k
-
-        # Pass 2: register writes and jumps.
-        for b in self.fn.blocks:
+        # Pass 2: the schedule's writes and jumps.
+        for b, bs in zip(self.fn.blocks, sched):
             self.local = lowered[b.name]
-            self.b.local, self.b.group = nets[b.name], b.name
-            base, jump = steps[b.name]
-            gate = jump - GATE_TO_LATCH
             for op in b.ops:
                 if id(op.result) in self.regs:
-                    self._write(self.regs[id(op.result)], gate, self.local[id(op.result)], f"keep %{op.result.name}")
+                    self._keep(bs, self.regs[id(op.result)], op.result, f"keep %{op.result.name}")
             t = b.term
             assert t is not None
             for succ in t.targets + [d for _, d in t.cases]:
                 for p in self._block(succ).phis:
                     for pred, v in p.incoming:
                         if pred == b.name:
-                            self._write(self.regs[id(p.result)], gate, self.get(v), p.text)
-            self._emit_terminator(b, steps, jump, result, gate, halt)
+                            self._keep(bs, self.regs[id(p.result)], v, p.text)
+            self._plan_terminator(b, bs, schedule)
 
-        for b in self.fn.blocks:
-            for p in b.phis:
-                self._emit_register(self.regs[id(p.result)], p.text)
-            for op in b.ops:
-                if id(op.result) in self.regs:
-                    self._emit_register(self.regs[id(op.result)], f"keep %{op.result.name}")
-        self._emit_register(result, "return value")
+        # Emit: each block's gates and jumps next to its combinators, then registers.
+        for bs in sched:
+            self.b.local, self.b.group = nets[bs.name], bs.name
+            for w in bs.writes:
+                self._emit_write(w)
+            for j in bs.jumps:
+                self._emit_jump(j)
+        for r in self.registers:
+            self._emit_register(r, schedule.latch_steps(r))
+        halt = schedule.halt
 
         # Halt: hold S at the halt step by cancelling the counter's +1.
         halt_dec = Decider([self._ge(halt)], [Out(self.step, copy=False, constant=-1)], label="halt")
         self.b.place(halt_dec, (RED,), RED, group="control")
 
+        steps = {bs.name: (bs.base, bs.jump) for bs in sched}
         return SteppedCompiled(
-            self.fn.name, self.b.nl, params, param_signals, result.signal, halt, self.b.bus.probe, steps, self.names, reset
+            self.fn.name, self.b.nl, params, param_signals, result.signal, halt, self.b.bus.probe, steps, self.names,
+            reset, schedule,
         )
 
     def _ge(self, k: int) -> Cond:
@@ -281,45 +275,47 @@ class _CfgLowerer(_Lowerer):
                 needed += [self.get(v) for pred, v in p.incoming if pred == b.name]
         return _depth(*needed)
 
-    def _emit_terminator(self, b: Block, steps, jump: int, result: _Register, gate: int, halt: int) -> None:
+    def _keep(self, bs: BlockSchedule, r: Register, v: Operand, label: str) -> None:
+        if not any(w.register is r for w in bs.writes):
+            bs.writes.append(Write(bs.gate, self.get(v), r, label, _name(v)))
+
+    def _plan_terminator(self, b: Block, bs: BlockSchedule, schedule: Schedule) -> None:
         t = b.term
         assert t is not None
-        nxt = jump + 1
-
-        def delta(target: str) -> int:
-            return steps[target][0] - nxt
-
-        at = self._step_is(jump)
+        nxt = bs.jump + 1
         label = f"{b.name}: {t.text.splitlines()[0]}"
+
+        def go(target: str, tests: list[Test], note: str = "") -> None:
+            delta = (schedule.halt if target == HALT else schedule.block(target).base) - nxt
+            bs.jumps.append(Jump(bs.jump, tests, delta, target, f"{label}{note}"))
+
         if t.kind == "ret":
             assert t.value is not None
-            self._write(result, gate, self.get(t.value), "return value")
-            self._jump([at], halt - nxt, label, set())
+            self._keep(bs, schedule.result, t.value, "return value")
+            go(HALT, [])
         elif t.kind == "br":
-            self._jump([at], delta(t.targets[0]), label, set())
+            go(t.targets[0], [])
         elif t.kind == "condbr":
             c = self.get(t.cond)
             if isinstance(c, int):
-                self._jump([at], delta(t.targets[0] if c else t.targets[1]), label, set())
+                go(t.targets[0] if c else t.targets[1], [])
             else:
-                self._jump([at, Cond(_operand(c), "!=", 0)], delta(t.targets[0]), f"{label} (true)", _colors(c))
-                self._jump([at, Cond(_operand(c), "=", 0)], delta(t.targets[1]), f"{label} (false)", _colors(c))
+                go(t.targets[0], [Test(c, "!=", 0, _name(t.cond))], " (true)")
+                go(t.targets[1], [Test(c, "=", 0, _name(t.cond))], " (false)")
         elif t.kind == "switch":
             c = self.get(t.cond)
             if isinstance(c, int):
-                dest = dict(t.cases).get(c, t.targets[0])
-                self._jump([at], delta(dest), label, set())
+                go(dict(t.cases).get(c, t.targets[0]), [])
                 return
             for val, dest in t.cases:
-                self._jump([at, Cond(_operand(c), "=", val)], delta(dest), f"{label} (case {val})", _colors(c))
-            self._jump(
-                [at] + [Cond(_operand(c), "!=", val) for val, _ in t.cases],
-                delta(t.targets[0]),
-                f"{label} (default)",
-                _colors(c),
-            )
+                go(dest, [Test(c, "=", val, _name(t.cond))], f" (case {val})")
+            go(t.targets[0], [Test(c, "!=", val, _name(t.cond)) for val, _ in t.cases], " (default)")
         else:
             raise Unsupported(f"terminator {t.kind}")
+
+
+def _name(v: Operand) -> str:
+    return f"%{v.name}" if isinstance(v, Value) else ""
 
 
 def lower_cfg(fn: Function) -> SteppedCompiled:
