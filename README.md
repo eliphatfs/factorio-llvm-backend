@@ -9,7 +9,7 @@ signal name is the register number. The milestones are M0 infrastructure, M1 str
 
 ## Status
 
-M0 (infrastructure) and M1 (straight-line functions) are in place:
+M0 (infrastructure), M1 (straight-line functions) and M2 (control flow) are in place:
 
 | Module | What it does |
 | --- | --- |
@@ -20,15 +20,31 @@ M0 (infrastructure) and M1 (straight-line functions) are in place:
 | `factorio_llvm/signals.py` | The 395 base-game signals, from Factorio 2.1.24 |
 | `factorio_llvm/frontend.py` | Reads LLVM IR with llvmlite (or C via clang) into a small dataflow IR |
 | `factorio_llvm/lower.py` | Lowers a single-block i32 function to a combinator pipeline |
+| `factorio_llvm/cfg.py` | Lowers functions with branches and loops to a stepped circuit |
+| `factorio_llvm/layout.py` | Places combinators in substation cells and routes nets as wires |
 
 M1 supports one basic block of i1/i32 code: `add sub mul sdiv srem shl ashr lshr
 and or xor`, every `icmp` predicate, `select`, `zext/sext/trunc` between i1 and
-i32, and the `smax smin umax umin abs` intrinsics. Every value gets its own
-signal on one red bus, so a function can have at most 395 values. Tests compare
+i32, and the `smax smin umax umin abs` intrinsics. Values are named per basic block on
+the block's own green net; only registers, arguments and the step signal share
+the red bus. So the 395-signal limit applies to one block, and to the number of
+values kept across blocks, not to the whole function. Tests compare
 the simulated circuit with the same C compiled natively.
 
-Next: M2 adds control flow (the step counter `S`, bus registers, phi, branches
-and loops).
+`udiv`/`urem` are built from signed operations.
+
+M2 handles branches, loops, `switch` and `phi`. A step signal `S` on the bus
+counts up one per tick, and each basic block owns a range of steps. Values that
+cross blocks, and every phi, live in one-decider bus registers; branches add a
+constant to `S`. Each block costs its own depth plus 3 ticks per visit. `ret`
+writes the result register and holds `S` at the halt step. Stepped blueprints
+are placed with the `RESET` constant combinator switched on, which holds `S` at
+1; switch it off to run, and on and off again to rerun with new arguments.
+
+C is compiled with `clang -O2` plus flags that stop vectorisation, unrolling
+and closed-form loop exit values (`factorio_llvm.frontend.CLANG_FLAGS`).
+
+Next: M3 adds memory (arrays in RAM banks, `load`/`store`).
 
 ## Usage
 
@@ -36,6 +52,7 @@ and loops).
 pip install -e '.[dev]'
 pytest
 python -m factorio_llvm examples/m1.c -f mix --args 6 7
+python -m factorio_llvm examples/m2.c -f gcd --args 84 36
 python -m examples.calibrate
 ```
 
@@ -52,5 +69,9 @@ edge case the simulator models (shift amounts, right-shift sign,
 negative powers, division by zero, Each outputs); all matched the game on 2.1. The second blueprint is the
 bus register: `X` should become 42 once `S` passes 5 and stay there.
 
-Blueprints use an automatic grid layout with no electric poles yet; place
-them where they get power.
+Blueprints are laid out in 12x12 cells, each powered by a substation at its
+centre. Combinators of one basic block sit together. Each net becomes a minimum
+spanning tree; an edge longer than the 9-tile combinator reach goes through
+substations (18-tile reach), and since a substation joins everything on one
+colour, each carries at most one red and one green net. Spare substation sites
+in each cell are built only when routing needs them.
