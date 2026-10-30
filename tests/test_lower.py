@@ -101,3 +101,12 @@ def test_cli(tmp_path, capsys):
     out = capsys.readouterr()
     assert "simulated result: 43" in out.err
     assert out.out.startswith("0")
+
+
+def test_attribute_groups_are_stripped():
+    from factorio_llvm.frontend import strip_attributes
+
+    ir = 'define i32 @f(i32 %a) #0 {\n  ret i32 %a\n}\nattributes #0 = { memory(none) "x"="y" }\n'
+    out = strip_attributes(ir)
+    assert "#0" not in out and "memory" not in out
+    assert lower(read_function(ir)).run(5) == 5

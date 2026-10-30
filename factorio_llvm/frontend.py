@@ -70,8 +70,21 @@ _INTRINSIC = re.compile(r"@llvm\.(\w+)\.i\d+\(")
 INTRINSICS = {"smax", "smin", "umax", "umin", "abs"}
 
 
+_ATTR_GROUP = re.compile(r"^attributes #\d+ = .*$", re.M)
+_ATTR_REF = re.compile(r"\s#\d+\b")
+
+
+def strip_attributes(ir_text: str) -> str:
+    """Drop function attribute groups, which the compiler does not use.
+
+    A clang newer than llvmlite's LLVM writes attributes (such as ``memory(none)``)
+    that the older parser rejects.
+    """
+    return _ATTR_REF.sub("", _ATTR_GROUP.sub("", ir_text))
+
+
 def read_function(ir_text: str, name: str | None = None) -> Function:
-    module = llvm.parse_assembly(ir_text)
+    module = llvm.parse_assembly(strip_attributes(ir_text))
     module.verify()
     defined = [f for f in module.functions if not f.is_declaration]
     if name is None:
