@@ -4,7 +4,7 @@ Run:  python -m examples.calibrate
 
 1. "calibration": each arithmetic or decider combinator gets its own constant
    combinator. Hover each combinator's output in game and compare it with the
-   value printed here. The cases cover every behaviour marked ASSUMPTION in
+   value printed here. The cases cover the edge cases modelled in
    factorio_llvm/sim.py.
 2. "bus register": a step counter S and a one-decider register X on a shared
    red bus. X should become 42 when S passes 5 and then stay at 42.
