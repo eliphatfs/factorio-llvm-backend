@@ -21,6 +21,7 @@ from .netlist import (
     Cond,
     Connector,
     Constant,
+    Lamp,
     Decider,
     Entity,
     Pole,
@@ -118,6 +119,9 @@ def _control_behavior(e: Entity) -> dict[str, Any]:
         }
     if isinstance(e, Pole):
         return {}
+    if isinstance(e, Lamp):
+        cond = {k: v for k, v in _cond(0, e.condition).items() if not k.endswith("_networks")}
+        return {"circuit_enabled": True, "circuit_condition": cond}
     if isinstance(e, Decider):
         dc: dict[str, Any] = {
             "conditions": [_cond(i, c) for i, c in enumerate(e.conditions)],
@@ -129,7 +133,7 @@ def _control_behavior(e: Entity) -> dict[str, Any]:
     raise TypeError(type(e).__name__)
 
 
-_PROTOTYPE = {Pole: "substation", Constant: "constant-combinator", Arithmetic: "arithmetic-combinator", Decider: "decider-combinator"}
+_PROTOTYPE = {Lamp: "small-lamp", Pole: "substation", Constant: "constant-combinator", Arithmetic: "arithmetic-combinator", Decider: "decider-combinator"}
 
 
 def _position(e: Entity, slot: int) -> tuple[float, float]:
@@ -138,13 +142,13 @@ def _position(e: Entity, slot: int) -> tuple[float, float]:
     col, row = slot % COLUMNS, slot // COLUMNS
     # Two-tile combinators face north (input south, output north); a 1x1
     # constant combinator sits in the top tile of its slot.
-    if isinstance(e, Constant):
+    if isinstance(e, (Constant, Lamp)):
         return (col + 0.5, row * 3 + 0.5)
     return (col + 0.5, row * 3 + 1.0)
 
 
 def _connector_id(c: Connector, color: Color) -> int:
-    if isinstance(c.entity, (Constant, Pole)):
+    if isinstance(c.entity, (Constant, Pole, Lamp)):
         return 1 if color == RED else 2
     base = 1 if c.side == "in" else 3
     return base + (0 if color == RED else 1)
@@ -220,6 +224,11 @@ def _entity_in(d: dict[str, Any]) -> Entity:
     pos = (float(d["position"]["x"]), float(d["position"]["y"]))
     label = d.get("player_description", "")
     name = d["name"]
+    if name == "small-lamp":
+        c = cb["circuit_condition"]
+        right = _sig_in(c["second_signal"], None) if "second_signal" in c else int(c.get("constant", 0))
+        cmp = _CMP_FROM_GAME.get(c.get("comparator", "<"), c.get("comparator", "<"))
+        return Lamp(Cond(_sig_in(c["first_signal"], None), cmp, right), label=label, position=pos)
     if name == "constant-combinator":
         signals: dict[str, int] = {}
         for section in cb.get("sections", {}).get("sections", []):

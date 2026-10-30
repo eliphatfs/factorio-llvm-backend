@@ -33,6 +33,7 @@ class Array:
     size: int
     init: list[int]  # initial contents (zeros if none)
     readonly: bool = False  # a constant global: becomes a ROM
+    external: bool = False  # declared, not defined: memory-mapped I/O (see memory.py)
 
     def __repr__(self) -> str:
         return f"@{self.name}[{self.size}]"
@@ -138,6 +139,7 @@ _INTRINSIC = re.compile(r"@llvm\.(\w+)\.i\d+\(")
 INTRINSICS = {"smax", "smin", "umax", "umin", "abs"}
 _CASE = re.compile(r"i\d+ (-?\d+), label")
 _GLOBAL = re.compile(r"^@([\w.$-]+) = .*?\b(global|constant) (\[(\d+) x i32\]|i32) (.*?)(?:, align \d+)?$")
+_EXTERN = re.compile(r"^@([\w.$-]+) = external .*?\bglobal (\[(\d+) x i32\]|i32)(?:, align \d+)?$")
 _ALLOCA = re.compile(r"alloca (\[(\d+) x i32\]|i32)(?=,|$)")
 _GEP = re.compile(r"getelementptr (?:inbounds |nuw |nusw )*(\[\d+ x i32\]|i32|i8), ptr")
 _CONST_GEP = re.compile(r"ptr getelementptr (?:inbounds |nuw |nusw )*\(\[\d+ x i32\], ptr @([\w.$-]+), i64 0, i64 (\d+)\)")
@@ -146,6 +148,11 @@ _SKIPPED_CALLS = re.compile(r"@llvm\.(lifetime|assume|dbg)\.")
 
 
 def _global_array(text: str) -> Array | None:
+    m = _EXTERN.match(text)
+    if m:
+        name, _, n = m.groups()
+        size = int(n) if n else 1
+        return Array(name, size, [0] * size, external=True)
     m = _GLOBAL.match(text)
     if not m:
         return None

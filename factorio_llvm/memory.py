@@ -17,6 +17,13 @@ after registers would (step gate + 3, the next block's first step). Blocks end
 after each store (see ``frontend.split_after_stores``), so a later load always
 sees it.
 
+I/O. An ``extern`` array is memory-mapped I/O on two red nets, each with a
+terminal constant combinator (empty, labelled INPUT / OUTPUT) for wiring the
+circuit to the factory. If the program never stores to it, it is an input:
+word ``i`` is ``x + 0`` of signal ``io[i]`` on the INPUT net, read live. Else it
+is an output: ordinary RAM whose words are also copied, as ``io[i]``, onto the
+OUTPUT net.
+
 Read port. Port ``j`` of an array has an address net (signal ``A``) and a
 result net. Each word has a reader decider per port: ``A == i`` -> copy ``V``
 from the word's loop onto the result net. A load drives the address net only
@@ -30,8 +37,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .frontend import Array
+from .frontend import Unsupported
 from .lower import Lowered, Wire, _Builder
 from .netlist import GREEN, RED, Arithmetic, Cond, Constant, Decider, Net, Out, Sig
+from .signals import allocatable_signals
 
 ADDRESS = "signal-A"
 VALUE = "signal-V"
@@ -59,6 +68,12 @@ class _Bank:
     id: int
     words: list[Net] = field(default_factory=list)  # each word's private green loop
     ports: list[_Port] = field(default_factory=list)
+    stored: bool = False  # the program writes to it
+    io: list[str] = field(default_factory=list)  # external arrays: signal per word
+
+    @property
+    def is_input(self) -> bool:
+        return self.array.external and not self.stored
 
 
 class Memory:
@@ -87,7 +102,31 @@ class Memory:
         self.port(a, j).result.attach(rename.inp)
         return Wire(out, _depth_of(address) + LOAD_LATENCY)
 
-    def build(self) -> None:
+    def assign_io(self, chosen: dict[str, list[str]], taken_on_output: set[str]) -> dict[str, list[str]]:
+        """Pick the I/O signal of every word of every external array."""
+        pools = {True: list(_IO_ORDER), False: [s for s in _IO_ORDER if s not in taken_on_output]}
+        used: dict[bool, set[str]] = {True: set(), False: set(taken_on_output)}
+        out: dict[str, list[str]] = {}
+        for bank in self.banks.values():
+            a = bank.array
+            if not a.external:
+                continue
+            side = bank.is_input
+            if a.name in chosen:
+                sigs = chosen[a.name]
+                if len(sigs) != a.size:
+                    raise Unsupported(f"--io {a.name}: {len(sigs)} signals for {a.size} words")
+            else:
+                sigs = [s for s in pools[side] if s not in used[side]][: a.size]
+            clash = used[side] & set(sigs)
+            if clash or len(set(sigs)) != len(sigs):
+                raise Unsupported(f"I/O signal used twice on the {'INPUT' if side else 'OUTPUT'} net: {sorted(clash) or sigs}")
+            used[side] |= set(sigs)
+            bank.io = sigs
+            out[a.name] = sigs
+        return out
+
+    def build(self, inputs: Net | None, outputs: Net) -> None:
         """Place every word and its readers."""
         s_red = Sig(self.step, frozenset({RED}))
         for bank in self.banks.values():
@@ -96,6 +135,16 @@ class Memory:
             for i, init in enumerate(a.init):
                 loop = self.b.nl.net(GREEN, f"{a.name}[{i}]")
                 bank.words.append(loop)
+                if bank.is_input:
+                    assert inputs is not None
+                    pin = Arithmetic(Sig(bank.io[i], frozenset({RED})), "+", 0, VALUE, label=f"{a.name}[{i}] <- {bank.io[i]}")
+                    self.b.place(pin, (), loop, group)
+                    inputs.attach(pin.inp)
+                    continue
+                if a.external:
+                    pin = Arithmetic(Sig(VALUE, frozenset({GREEN})), "+", 0, bank.io[i], label=f"{a.name}[{i}] -> {bank.io[i]}")
+                    self.b.place(pin, (), outputs, group)
+                    loop.attach(pin.inp)
                 if a.readonly:
                     if init:
                         loop.attach(self.b.place(Constant({VALUE: init}, label=f"{a.name}[{i}]"), (), None, group).out)
@@ -128,6 +177,12 @@ class Memory:
                     self.b.place(reader, (), port.result, group)
                     port.address.attach(reader.inp)
                     loop.attach(reader.inp)
+
+
+# Default I/O signals: digits, then letters, then the rest.
+_IO_ORDER = [s for s in allocatable_signals() if s.startswith("signal-") and s[-1].isdigit()] + [
+    s for s in allocatable_signals() if not (s.startswith("signal-") and s[-1].isdigit()) and s != "signal-check"
+]
 
 
 def _depth_of(v: Lowered) -> int:

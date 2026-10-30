@@ -20,13 +20,24 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("source", type=Path, help=".c file (compiled with clang -O2) or .ll file")
     p.add_argument("--function", "-f", help="function to compile (default: the only one)")
     p.add_argument("--args", type=int, nargs="*", default=None, help="argument values to simulate and bake in")
+    p.add_argument(
+        "--io",
+        action="append",
+        default=[],
+        metavar="ARRAY=SIG,SIG,...",
+        help="signals for the words of an extern array (memory-mapped I/O); default signal-0, signal-1, ...",
+    )
     p.add_argument("--schedule", action="store_true", help="print the step schedule of a function with control flow")
     p.add_argument("--no-blueprint", action="store_true", help="do not print the blueprint string")
     ns = p.parse_args(argv)
 
     ir = compile_c(ns.source) if ns.source.suffix == ".c" else ns.source.read_text()
     try:
-        compiled = lower(read_function(ir, ns.function))
+        io = {}
+        for spec in ns.io:
+            name, _, sigs = spec.partition("=")
+            io[name] = [x.strip() for x in sigs.split(",") if x.strip()]
+        compiled = lower(read_function(ir, ns.function), io)
     except Unsupported as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -43,6 +54,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  result -> {compiled.result} (valid once S = {compiled.halt})", file=sys.stderr)
     elif not isinstance(compiled.result, int):
         print(f"  result -> {compiled.result.signal}", file=sys.stderr)
+    if stepped:
+        print(f"  OUTPUT terminal: {compiled.result} = result and signal-check = 1 once halted", file=sys.stderr)
+        for name, sigs in compiled.io.items():
+            side = "INPUT" if compiled.inputs is not None and _reads_only(compiled, name) else "OUTPUT"
+            print(f"  {side} terminal: @{name}[i] = " + ", ".join(sigs), file=sys.stderr)
     if stepped and ns.schedule:
         print(compiled.schedule, file=sys.stderr)
     if ns.args is not None:
@@ -54,6 +70,10 @@ def main(argv: list[str] | None = None) -> int:
     if not ns.no_blueprint:
         print(export_string(compiled.netlist, f"@{compiled.function}"))
     return 0
+
+
+def _reads_only(compiled, name: str) -> bool:
+    return not any(st.array == name for b in compiled.schedule.blocks for st in b.stores)
 
 
 if __name__ == "__main__":

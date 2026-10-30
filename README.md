@@ -5,11 +5,11 @@ Compile LLVM IR to Factorio 2.1 combinator circuits (base game, no Space Age).
 The approach is a simplified high-level synthesis flow: a global step signal `S`
 drives control, each IR operation becomes an arithmetic or decider combinator,
 and SSA values live in one-decider registers on a shared red bus, where the
-signal name is the register number. The milestones are M0 infrastructure, M1 straight-line code, M2 control flow, M3 memory, M4 in-game layout, M5 optimisation.
+signal name is the register number. The milestones are M0 infrastructure, M1 straight-line code, M2 control flow, M3 memory, M4 layout and I/O, M5 optimisation.
 
 ## Status
 
-M0 (infrastructure), M1 (straight-line functions), M2 (control flow) and M3 (arrays) are in place:
+M0 (infrastructure), M1 (straight-line functions), M2 (control flow), M3 (arrays) and M4 (layout and I/O) are in place:
 
 | Module | What it does |
 | --- | --- |
@@ -55,6 +55,15 @@ ticks on top of its address. Blocks are split after every store, so a store
 takes effect before the next load. Memory is cleared (or reset to its initial
 values) while `RESET` is on. Not supported: pointer arguments, pointers that
 may point into different arrays, other element types, `memcpy`.
+
+M4 I/O. Every stepped blueprint has an **OUTPUT** terminal (an empty constant
+combinator to wire the factory to): once halted it carries the result and
+`signal-check = 1`, and a lamp lights. `extern` arrays are memory-mapped I/O
+(see `examples/m4.c`): one the program only reads is an input, word `i` read
+live from signal `i` on the **INPUT** terminal's red wire (use `volatile` so
+clang re-reads it); one it writes is an output, every word shown on the OUTPUT
+terminal. Signals default to `signal-0`, `signal-1`, ...; pick them with
+`--io in=iron-plate,copper-plate`.
 
 ## Usage
 

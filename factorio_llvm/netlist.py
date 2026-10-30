@@ -112,6 +112,14 @@ class Pole(Entity):
 
 
 @dataclass(eq=False)
+class Lamp(Entity):
+    """A small lamp: lights while ``condition`` holds on its wires. Its one
+    connection point is modelled as the input side."""
+
+    condition: "Cond"
+
+
+@dataclass(eq=False)
 class Arithmetic(Entity):
     """Arithmetic combinator: ``left op right -> output``."""
 

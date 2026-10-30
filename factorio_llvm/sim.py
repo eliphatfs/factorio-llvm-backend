@@ -26,6 +26,7 @@ from .netlist import (
     Constant,
     Decider,
     Entity,
+    Lamp,
     Netlist,
     Out,
     Pole,
@@ -239,7 +240,7 @@ class Simulator:
                     new[id(e)] = eval_arithmetic(e, self._inputs(e))
                 elif isinstance(e, Decider):
                     new[id(e)] = eval_decider(e, self._inputs(e))
-                elif isinstance(e, (Constant, Pole)):
+                elif isinstance(e, (Constant, Pole, Lamp)):
                     new[id(e)] = {}
                 else:
                     raise TypeError(f"cannot simulate {type(e).__name__}")
@@ -271,6 +272,10 @@ class Simulator:
 
     def read(self, connector: Connector, name: str, networks: Iterable[Color] = BOTH) -> int:
         return wrap(sum(self.network(connector, c).get(name, 0) for c in networks))
+
+    def lit(self, lamp: Lamp) -> bool:
+        """Whether ``lamp`` is on this tick."""
+        return eval_decider(Decider([lamp.condition], [Out("signal-check", copy=False)]), self._inputs(lamp)) != {}
 
     def output(self, e: Entity) -> Signals:
         """What ``e`` is outputting this tick."""
