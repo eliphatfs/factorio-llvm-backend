@@ -1,0 +1,275 @@
+"""Blueprint string export and import (Factorio 2.1 format).
+
+A blueprint string is ``"0" + base64(zlib(json))``. Combinator wire connector
+ids are 1/2 for the red/green input side and 3/4 for the red/green output side;
+a constant combinator has only 1 (red) and 2 (green).
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import zlib
+from typing import Any
+
+from .netlist import (
+    BOTH,
+    GREEN,
+    RED,
+    Arithmetic,
+    Color,
+    Cond,
+    Connector,
+    Constant,
+    Decider,
+    Entity,
+    Netlist,
+    Out,
+    Sig,
+)
+from .signals import signal_type
+
+# 2.1.23.0, the version decider-compiler's 2.1 blueprints carry.
+BLUEPRINT_VERSION = (2 << 48) | (1 << 32) | (23 << 16)
+
+_CMP_TO_GAME = {"<=": "≤", ">=": "≥", "!=": "≠"}
+_CMP_FROM_GAME = {v: k for k, v in _CMP_TO_GAME.items()} | {"==": "="}
+
+COLUMNS = 8  # auto layout: combinators per row
+
+
+# --------------------------------------------------------------------------- encoding
+
+
+def encode(obj: dict[str, Any]) -> str:
+    data = json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode()
+    return "0" + base64.b64encode(zlib.compress(data, 9)).decode()
+
+
+def decode(text: str) -> dict[str, Any]:
+    text = text.strip()
+    if not text.startswith("0"):
+        raise ValueError("unsupported blueprint string version")
+    return json.loads(zlib.decompress(base64.b64decode(text[1:])))
+
+
+# --------------------------------------------------------------------------- export
+
+
+def _signal(name: str) -> dict[str, str]:
+    return {"type": signal_type(name), "name": name}
+
+
+def _nets(networks: frozenset[Color]) -> dict[str, bool]:
+    return {"red": RED in networks, "green": GREEN in networks}
+
+
+def _operand(prefix: str, o: Sig | int) -> dict[str, Any]:
+    if isinstance(o, int):
+        return {f"{prefix}_constant": o}
+    return {f"{prefix}_signal": _signal(o.name), f"{prefix}_signal_networks": _nets(o.networks)}
+
+
+def _out(o: Out) -> dict[str, Any]:
+    d: dict[str, Any] = {"signal": _signal(o.signal)}
+    if o.copy:
+        d["networks"] = _nets(o.networks)
+    else:
+        d["copy_count_from_input"] = False
+        d["constant"] = o.constant
+    return d
+
+
+def _cond(i: int, c: Cond) -> dict[str, Any]:
+    d: dict[str, Any] = {
+        "first_signal": _signal(c.left.name),
+        "first_signal_networks": _nets(c.left.networks),
+        "comparator": _CMP_TO_GAME.get(c.cmp, c.cmp),
+    }
+    if isinstance(c.right, int):
+        d["constant"] = c.right
+    else:
+        d["second_signal"] = _signal(c.right.name)
+        d["second_signal_networks"] = _nets(c.right.networks)
+    if i > 0:
+        d["compare_type"] = c.join
+    return d
+
+
+def _control_behavior(e: Entity) -> dict[str, Any]:
+    if isinstance(e, Constant):
+        filters = [
+            {"index": i + 1, **_signal(n), "quality": "normal", "comparator": "=", "count": v}
+            for i, (n, v) in enumerate(e.signals.items())
+        ]
+        cb: dict[str, Any] = {"sections": {"sections": [{"index": 1, "filters": filters}]}}
+        if not e.enabled:
+            cb["is_on"] = False
+        return cb
+    if isinstance(e, Arithmetic):
+        return {
+            "arithmetic_conditions": {
+                **_operand("first", e.left),
+                "operation": e.op,
+                **_operand("second", e.right),
+                "output_signal": _signal(e.output),
+            }
+        }
+    if isinstance(e, Decider):
+        dc: dict[str, Any] = {
+            "conditions": [_cond(i, c) for i, c in enumerate(e.conditions)],
+            "outputs": [_out(o) for o in e.outputs],
+        }
+        if e.else_outputs:
+            dc["else_outputs"] = [_out(o) for o in e.else_outputs]
+        return {"decider_conditions": dc}
+    raise TypeError(type(e).__name__)
+
+
+_PROTOTYPE = {Constant: "constant-combinator", Arithmetic: "arithmetic-combinator", Decider: "decider-combinator"}
+
+
+def _position(e: Entity, slot: int) -> tuple[float, float]:
+    if e.position is not None:
+        return e.position
+    col, row = slot % COLUMNS, slot // COLUMNS
+    # Two-tile combinators face north (input south, output north); a 1x1
+    # constant combinator sits in the top tile of its slot.
+    if isinstance(e, Constant):
+        return (col + 0.5, row * 3 + 0.5)
+    return (col + 0.5, row * 3 + 1.0)
+
+
+def _connector_id(c: Connector, color: Color) -> int:
+    if isinstance(c.entity, Constant):
+        return 1 if color == RED else 2
+    base = 1 if c.side == "in" else 3
+    return base + (0 if color == RED else 1)
+
+
+def to_blueprint(netlist: Netlist, label: str = "factorio-llvm") -> dict[str, Any]:
+    numbers: dict[int, int] = {}
+    entities = []
+    for slot, e in enumerate(netlist.entities):
+        n = slot + 1
+        numbers[id(e)] = n
+        x, y = _position(e, slot)
+        ent: dict[str, Any] = {
+            "entity_number": n,
+            "name": _PROTOTYPE[type(e)],
+            "position": {"x": x, "y": y},
+            "control_behavior": _control_behavior(e),
+        }
+        if e.label:
+            ent["player_description"] = e.label
+        entities.append(ent)
+    wires = [
+        [numbers[id(w.a.entity)], _connector_id(w.a, w.color), numbers[id(w.b.entity)], _connector_id(w.b, w.color)]
+        for w in netlist.wires
+    ]
+    return {
+        "blueprint": {
+            "item": "blueprint",
+            "label": label,
+            "icons": [{"signal": {"type": "item", "name": "decider-combinator"}, "index": 1}],
+            "entities": entities,
+            "wires": wires,
+            "version": BLUEPRINT_VERSION,
+        }
+    }
+
+
+def export_string(netlist: Netlist, label: str = "factorio-llvm") -> str:
+    return encode(to_blueprint(netlist, label))
+
+
+# --------------------------------------------------------------------------- import
+
+
+def _networks_in(d: dict[str, Any] | None) -> frozenset[Color]:
+    if d is None:
+        return BOTH
+    return frozenset(c for c in (RED, GREEN) if d.get(c.value, True))
+
+
+def _sig_in(d: dict[str, Any], nets: dict[str, Any] | None) -> Sig:
+    return Sig(d["name"], _networks_in(nets))
+
+
+def _operand_in(ac: dict[str, Any], prefix: str) -> Sig | int:
+    if f"{prefix}_signal" in ac:
+        return _sig_in(ac[f"{prefix}_signal"], ac.get(f"{prefix}_signal_networks"))
+    return int(ac.get(f"{prefix}_constant", 0))
+
+
+def _out_in(d: dict[str, Any]) -> Out:
+    copy = d.get("copy_count_from_input", True)
+    return Out(d["signal"]["name"], copy=copy, networks=_networks_in(d.get("networks")), constant=int(d.get("constant", 1)))
+
+
+def _entity_in(d: dict[str, Any]) -> Entity:
+    cb = d.get("control_behavior", {})
+    pos = (float(d["position"]["x"]), float(d["position"]["y"]))
+    label = d.get("player_description", "")
+    name = d["name"]
+    if name == "constant-combinator":
+        signals: dict[str, int] = {}
+        for section in cb.get("sections", {}).get("sections", []):
+            for f in section.get("filters", []):
+                signals[f["name"]] = signals.get(f["name"], 0) + int(f.get("count", 0))
+        return Constant(signals, enabled=cb.get("is_on", True), label=label, position=pos)
+    if name == "arithmetic-combinator":
+        ac = cb["arithmetic_conditions"]
+        return Arithmetic(
+            _operand_in(ac, "first"), ac.get("operation", "*"), _operand_in(ac, "second"),
+            ac["output_signal"]["name"], label=label, position=pos,
+        )
+    if name == "decider-combinator":
+        dc = cb["decider_conditions"]
+        conds = []
+        for c in dc["conditions"]:
+            right: Sig | int = (
+                _sig_in(c["second_signal"], c.get("second_signal_networks")) if "second_signal" in c else int(c.get("constant", 0))
+            )
+            conds.append(
+                Cond(
+                    _sig_in(c["first_signal"], c.get("first_signal_networks")),
+                    _CMP_FROM_GAME.get(c.get("comparator", "<"), c.get("comparator", "<")),
+                    right,
+                    c.get("compare_type", "or"),
+                )
+            )
+        return Decider(
+            conds,
+            [_out_in(o) for o in dc.get("outputs", [])],
+            [_out_in(o) for o in dc.get("else_outputs", [])],
+            label=label, position=pos,
+        )
+    raise ValueError(f"unsupported entity {name!r}")
+
+
+def from_blueprint(obj: dict[str, Any]) -> Netlist:
+    bp = obj["blueprint"]
+    nl = Netlist()
+    by_number: dict[int, Entity] = {}
+    for d in bp.get("entities", []):
+        if d["name"] in ("medium-electric-pole", "small-electric-pole", "substation", "big-electric-pole"):
+            raise ValueError("electric poles in imported blueprints are not supported yet")
+        by_number[d["entity_number"]] = nl.add(_entity_in(d))
+
+    def conn(n: int, cid: int) -> tuple[Connector, Color]:
+        e = by_number[n]
+        color = RED if cid in (1, 3) else GREEN
+        side = "out" if isinstance(e, Constant) or cid in (3, 4) else "in"
+        return Connector(e, side), color
+
+    for a, ca, b, cb in bp.get("wires", []):
+        (pa, color), (pb, color_b) = conn(a, ca), conn(b, cb)
+        if color != color_b:
+            raise ValueError("wire joins different colours")
+        nl.wire(color, pa, pb)
+    return nl
+
+
+def import_string(text: str) -> Netlist:
+    return from_blueprint(decode(text))

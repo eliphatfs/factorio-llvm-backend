@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "factorio-llvm"
+version = "0.0.1"
+description = "Compile LLVM IR to Factorio combinator circuits"
+requires-python = ">=3.11"
+license = { text = "LGPL-2.1-or-later" }
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools]
+packages = ["factorio_llvm"]
+
+[tool.setuptools.package-data]
+factorio_llvm = ["data/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
