@@ -10,6 +10,10 @@ or CELL * sqrt(2) diagonally) are within substation reach (18) of each other.
 Entities are placed group by group (a basic block, a register, ...) in a
 serpentine order, so a group's members sit next to each other.
 
+Entities in group ``FIXED`` (a screen's lamps) keep the position they were
+given; a row of substations above and below them powers them and joins them to
+the relay network.
+
 Routing. Each logical net becomes a minimum spanning tree over its members.
 A tree edge within combinator reach is one wire. A longer edge goes through
 substations instead: from one end to a substation in reach, along substation
@@ -24,7 +28,7 @@ import math
 from collections import deque
 
 from .frontend import Unsupported
-from .netlist import GREEN, RED, Color, Connector, Constant, Entity, Net, Netlist, Pole, WireSeg
+from .netlist import GREEN, RED, Color, Connector, Constant, Entity, Lamp, Net, Panel, Netlist, Pole, WireSeg
 
 CELL = 12
 COMBINATOR_REACH = 9.0
@@ -65,9 +69,31 @@ def _ordered(entities: list[Entity]) -> list[Entity]:
     return [e for members in order.values() for e in members]
 
 
+FIXED = "screen"
+
+
+def _fixed_poles(fixed: list[Entity]) -> list[Pole]:
+    """Substations above and below a block of fixed 1x1 entities."""
+    if not fixed:
+        return []
+    xs = [e.position[0] for e in fixed if e.position]
+    ys = [e.position[1] for e in fixed if e.position]
+    top, bottom = math.floor(min(ys)), math.floor(max(ys))
+    poles = []
+    x = math.floor(min(xs)) + CELL // 2
+    while True:
+        for y in (top - 1.0, bottom + 2.0):  # 2x2 tiles just outside the block
+            poles.append(Pole(label="substation", position=(float(x), y), group="power"))
+        if x + CELL // 2 > max(xs):
+            break
+        x += CELL
+    return poles
+
+
 def place(netlist: Netlist) -> list[Pole]:
     """Give every entity a position; return all substation sites, power ones first."""
-    entities = _ordered([e for e in netlist.entities if not isinstance(e, Pole)])
+    fixed = [e for e in netlist.entities if e.group == FIXED and e.position is not None]
+    entities = _ordered([e for e in netlist.entities if not isinstance(e, Pole) and not any(e is f for f in fixed)])
     ncells = max(1, math.ceil(len(entities) / SLOTS_PER_CELL))
     width = max(1, math.ceil(math.sqrt(ncells)))
     slots = _cell_slots()
@@ -80,11 +106,11 @@ def place(netlist: Netlist) -> list[Pole]:
         cell, slot = divmod(n, SLOTS_PER_CELL)
         ox, oy = _cell_origin(cell, width)
         col, rp = slots[slot]
-        if isinstance(e, Constant):
+        if isinstance(e, (Constant, Lamp, Panel)):
             e.position = (ox + col + 0.5, oy + 2 * rp + 0.5)
         else:
             e.position = (ox + col + 0.5, oy + 2 * rp + 1.0)
-    return poles
+    return _fixed_poles(fixed) + poles
 
 
 def _dist(a: Entity, b: Entity) -> float:

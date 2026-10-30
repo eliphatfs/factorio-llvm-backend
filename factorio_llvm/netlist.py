@@ -112,6 +112,32 @@ class Pole(Entity):
 
 
 @dataclass(eq=False)
+class Lamp(Entity):
+    """A small lamp. With ``condition`` it lights while that holds; with ``rgb``
+    it is always on and shows that signal as a packed 0xRRGGBB colour. Its one
+    connection point is modelled as the input side."""
+
+    condition: "Cond | None" = None
+    rgb: str | None = None
+
+
+@dataclass(frozen=True)
+class Message:
+    """One display panel message: shown while ``condition`` holds."""
+
+    condition: "Cond"
+    icon: str
+    text: str = ""
+
+
+@dataclass(eq=False)
+class Panel(Entity):
+    """A display panel: shows the first message whose condition holds."""
+
+    messages: list[Message] = field(default_factory=list)
+
+
+@dataclass(eq=False)
 class Arithmetic(Entity):
     """Arithmetic combinator: ``left op right -> output``."""
 

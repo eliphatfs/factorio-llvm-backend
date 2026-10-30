@@ -23,11 +23,11 @@ step, where a decider holds ``S`` still.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .frontend import Array, Block, Function, Op, Operand, Unsupported, Value
 from .lower import PRIVATE_CONSTANT, Lowered, Wire, _Builder, _colors, _depth, _Lowerer, _operand
-from .netlist import GREEN, RED, Arithmetic, Cond, Connector, Constant, Decider, Net, Netlist, Out, Sig
+from .netlist import GREEN, RED, Arithmetic, Cond, Connector, Constant, Decider, Message, Net, Netlist, Out, Panel, Sig
 from .memory import ADDRESS, ENABLE, VALUE, Memory, Ptr
 from .schedule import GATE_TO_LATCH, BlockSchedule, Jump, Load, Register, Schedule, Store, Test, Write
 from .signals import EACH
@@ -35,6 +35,7 @@ from .sim import Simulator, wrap
 
 STEP = "signal-S"
 RESET = "signal-R"
+DONE = "signal-check"  # on the OUTPUT net once halted
 HALT = "<halt>"  # jump target name for the halt step
 # Reset holds S at 1, so the program starts at 2: nothing fires while in reset.
 FIRST_STEP = 2
@@ -53,6 +54,10 @@ class SteppedCompiled:
     signals: dict[str, str]
     reset: Constant
     schedule: Schedule
+    output: Connector  # the OUTPUT terminal: result and signal-check = 1 once halted, plus output arrays
+    status: Panel  # display panel: "reset", "running" or "done"
+    inputs: Constant | None = None  # the INPUT terminal, if the program reads extern arrays
+    io: dict[str, list[str]] = field(default_factory=dict)  # extern array -> signal per word
     last_ticks: int = 0
 
     @property
@@ -73,8 +78,10 @@ class SteppedCompiled:
 
 
 class _CfgLowerer(_Lowerer):
-    def __init__(self, fn: Function) -> None:
+    def __init__(self, fn: Function, io: dict[str, list[str]] | None = None, screen_width: int | None = None) -> None:
         super().__init__(fn)
+        self.io_choice = io or {}
+        self.screen_width = screen_width
         self.step = self.b.reserve(STEP)
         self.local: dict[int, Lowered] = {}
         self.regs: dict[int, Register] = {}  # value id -> register
@@ -118,6 +125,7 @@ class _CfgLowerer(_Lowerer):
             if ptr.array.readonly:
                 raise Unsupported(f"store to a constant: {op.text}")
             bank = self.mem.bank(ptr.array)
+            bank.stored = True
             names = (_name(op.args[1]), _name(op.args[0]))
             self.stores.append(Store(0, ptr.array.name, bank.id, ptr.index, value, sources=names))
             return 0
@@ -125,6 +133,7 @@ class _CfgLowerer(_Lowerer):
             assert self.mem is not None
             arr = op.args[0]
             assert isinstance(arr, Array)
+            self.mem.bank(arr).stored = True
             self.stores.append(Store(0, arr.name, self.mem.bank(arr).id, clear=True))
             return 0
         return super().op(op)
@@ -305,9 +314,39 @@ class _CfgLowerer(_Lowerer):
                 self._emit_jump(j)
         for r in self.registers:
             self._emit_register(r, schedule.latch_steps(r))
-        if self.mem is not None:
-            self.mem.build()
         halt = schedule.halt
+
+        # I/O: an OUTPUT terminal with the result once halted, a status panel, and
+        # memory-mapped extern arrays (INPUT terminal only if something reads one).
+        self.b.group = "io"
+        output = self.b.nl.net(RED, "OUTPUT")
+        out_terminal = self.b.place(Constant({}, label="OUTPUT: wire the factory here"), (), output)
+        port = Decider(
+            [self._ge(halt)],
+            [Out(result.signal, networks=RED), Out(DONE, copy=False)],
+            label="result to OUTPUT once halted",
+        )
+        self.b.place(port, (RED,), output)
+        s = Sig(self.step, frozenset({RED}))
+        status = Panel(
+            [
+                Message(self._ge(halt), "signal-check", "done"),
+                Message(Cond(s, "<=", 1), "signal-deny", "reset"),
+                Message(Cond(s, ">", 1), "signal-hourglass", "running"),
+            ],
+            label="status",
+        )
+        self.b.place(status, (RED,))
+        inputs, in_terminal, io = None, None, {}
+        if self.mem is not None:
+            io = self.mem.assign_io(self.io_choice, {result.signal, DONE})
+            if any(bank.is_input for bank in self.mem.banks.values()):
+                inputs = self.b.nl.net(RED, "INPUT")
+                in_terminal = self.b.place(Constant({}, label="INPUT: wire the factory here"), (), inputs)
+            self.mem.build(inputs, output, self.screen_width)
+        unknown = set(self.io_choice) - set(io)
+        if unknown:
+            raise Unsupported(f"--io names no extern array: {sorted(unknown)}")
 
         # Halt: hold S at the halt step by cancelling the counter's +1.
         halt_dec = Decider([self._ge(halt)], [Out(self.step, copy=False, constant=-1)], label="halt")
@@ -316,7 +355,7 @@ class _CfgLowerer(_Lowerer):
         steps = {bs.name: (bs.base, bs.jump) for bs in sched}
         return SteppedCompiled(
             self.fn.name, self.b.nl, params, param_signals, result.signal, halt, self.b.bus.probe, steps, self.names,
-            reset, schedule,
+            reset, schedule, out_terminal.out, status, in_terminal, io,
         )
 
     def _ge(self, k: int) -> Cond:
@@ -390,5 +429,5 @@ def _name(v: Operand) -> str:
     return f"%{v.name}" if isinstance(v, Value) else ""
 
 
-def lower_cfg(fn: Function) -> SteppedCompiled:
-    return _CfgLowerer(fn).run()
+def lower_cfg(fn: Function, io: dict[str, list[str]] | None = None, screen_width: int | None = None) -> SteppedCompiled:
+    return _CfgLowerer(fn, io, screen_width).run()
