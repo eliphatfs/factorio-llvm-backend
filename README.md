@@ -58,12 +58,15 @@ may point into different arrays, other element types, `memcpy`.
 
 M4 I/O. Every stepped blueprint has an **OUTPUT** terminal (an empty constant
 combinator to wire the factory to): once halted it carries the result and
-`signal-check = 1`, and a lamp lights. `extern` arrays are memory-mapped I/O
+`signal-check = 1`. A display panel shows the status: reset, running or done. `extern` arrays are memory-mapped I/O
 (see `examples/m4.c`): one the program only reads is an input, word `i` read
 live from signal `i` on the **INPUT** terminal's red wire (use `volatile` so
 clang re-reads it); one it writes is an output, every word shown on the OUTPUT
 terminal. Signals default to `signal-0`, `signal-1`, ...; pick them with
-`--io in=iron-plate,copper-plate`.
+`--io in=iron-plate,copper-plate`. A written `extern` array named `screen...`
+is a lamp screen instead: a grid of lamps above the circuit, each showing its
+word as a packed `0xRRGGBB` colour (`--screen-width` sets the row length, at
+most 16 rows).
 
 ## Usage
 

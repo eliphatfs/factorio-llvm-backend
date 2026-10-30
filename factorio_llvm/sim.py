@@ -28,6 +28,7 @@ from .netlist import (
     Entity,
     Lamp,
     Netlist,
+    Panel,
     Out,
     Pole,
     Sig,
@@ -240,7 +241,7 @@ class Simulator:
                     new[id(e)] = eval_arithmetic(e, self._inputs(e))
                 elif isinstance(e, Decider):
                     new[id(e)] = eval_decider(e, self._inputs(e))
-                elif isinstance(e, (Constant, Pole, Lamp)):
+                elif isinstance(e, (Constant, Pole, Lamp, Panel)):
                     new[id(e)] = {}
                 else:
                     raise TypeError(f"cannot simulate {type(e).__name__}")
@@ -273,9 +274,23 @@ class Simulator:
     def read(self, connector: Connector, name: str, networks: Iterable[Color] = BOTH) -> int:
         return wrap(sum(self.network(connector, c).get(name, 0) for c in networks))
 
+    def _holds(self, e: Entity, cond: Cond) -> bool:
+        return eval_decider(Decider([cond], [Out("signal-check", copy=False)]), self._inputs(e)) != {}
+
     def lit(self, lamp: Lamp) -> bool:
-        """Whether ``lamp`` is on this tick."""
-        return eval_decider(Decider([lamp.condition], [Out("signal-check", copy=False)]), self._inputs(lamp)) != {}
+        """Whether a conditional ``lamp`` is on this tick."""
+        assert lamp.condition is not None
+        return self._holds(lamp, lamp.condition)
+
+    def color(self, lamp: Lamp) -> int:
+        """The packed RGB colour an ``rgb`` lamp shows this tick."""
+        assert lamp.rgb is not None
+        inp = self._inputs(lamp)
+        return wrap(inp.red.get(lamp.rgb, 0) + inp.green.get(lamp.rgb, 0))
+
+    def message(self, panel: Panel) -> str:
+        """The text a display panel shows this tick ("" if none)."""
+        return next((m.text for m in panel.messages if self._holds(panel, m.condition)), "")
 
     def output(self, e: Entity) -> Signals:
         """What ``e`` is outputting this tick."""

@@ -329,10 +329,10 @@ class _Lowerer:
         )
 
 
-def lower(fn: Function, io: dict[str, list[str]] | None = None):
+def lower(fn: Function, io: dict[str, list[str]] | None = None, screen_width: int | None = None):
     """Compile ``fn``: a pipeline if it is one block, else a stepped circuit (M2)."""
     if fn.straight_line and not fn.arrays and not io:
         return _Lowerer(fn).run()
     from .cfg import lower_cfg
 
-    return lower_cfg(fn, io)
+    return lower_cfg(fn, io, screen_width)

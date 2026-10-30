@@ -16,3 +16,14 @@ int wait_and_square(int n) {
     }
     return s;
 }
+
+/* A lamp screen: extern arrays named screen* become a grid of lamps showing
+ * each word as a packed 0xRRGGBB colour (here 8 x 8, the default square). */
+extern volatile int screen[64];
+
+int draw(int t) {
+    for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 8; x++)
+            screen[y * 8 + x] = ((x + y + t) & 1) ? (x * 32) << 16 | (y * 32) << 8 | 0x40 : 0;
+    return t;
+}

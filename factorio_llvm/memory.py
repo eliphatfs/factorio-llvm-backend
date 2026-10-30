@@ -24,6 +24,11 @@ word ``i`` is ``x + 0`` of signal ``io[i]`` on the INPUT net, read live. Else it
 is an output: ordinary RAM whose words are also copied, as ``io[i]``, onto the
 OUTPUT net.
 
+Screen. A written extern array whose name starts with ``screen`` is a
+display instead: its words go onto a net of their own, read by a grid of lamps
+(``screen_width`` wide) that show each word as a packed 0xRRGGBB colour. The
+grid sits above the rest of the layout.
+
 Read port. Port ``j`` of an array has an address net (signal ``A``) and a
 result net. Each word has a reader decider per port: ``A == i`` -> copy ``V``
 from the word's loop onto the result net. A load drives the address net only
@@ -39,7 +44,7 @@ from dataclasses import dataclass, field
 from .frontend import Array
 from .frontend import Unsupported
 from .lower import Lowered, Wire, _Builder
-from .netlist import GREEN, RED, Arithmetic, Cond, Constant, Decider, Net, Out, Sig
+from .netlist import GREEN, RED, Arithmetic, Cond, Constant, Decider, Lamp, Net, Out, Sig
 from .signals import allocatable_signals
 
 ADDRESS = "signal-A"
@@ -69,11 +74,21 @@ class _Bank:
     words: list[Net] = field(default_factory=list)  # each word's private green loop
     ports: list[_Port] = field(default_factory=list)
     stored: bool = False  # the program writes to it
+    screen: Net | None = None  # screens: the net from the words to the lamps
     io: list[str] = field(default_factory=list)  # external arrays: signal per word
 
     @property
     def is_input(self) -> bool:
         return self.array.external and not self.stored
+
+    @property
+    def is_screen(self) -> bool:
+        return self.array.external and self.stored and self.array.name.startswith("screen")
+
+    @property
+    def side(self) -> str:
+        """Which net its I/O signals are on."""
+        return "INPUT" if self.is_input else f"screen {self.array.name}" if self.is_screen else "OUTPUT"
 
 
 class Memory:
@@ -104,34 +119,55 @@ class Memory:
 
     def assign_io(self, chosen: dict[str, list[str]], taken_on_output: set[str]) -> dict[str, list[str]]:
         """Pick the I/O signal of every word of every external array."""
-        pools = {True: list(_IO_ORDER), False: [s for s in _IO_ORDER if s not in taken_on_output]}
-        used: dict[bool, set[str]] = {True: set(), False: set(taken_on_output)}
+        used: dict[str, set[str]] = {"OUTPUT": set(taken_on_output)}
         out: dict[str, list[str]] = {}
         for bank in self.banks.values():
             a = bank.array
             if not a.external:
                 continue
-            side = bank.is_input
+            side = bank.side
+            used.setdefault(side, set())
             if a.name in chosen:
                 sigs = chosen[a.name]
                 if len(sigs) != a.size:
                     raise Unsupported(f"--io {a.name}: {len(sigs)} signals for {a.size} words")
             else:
-                sigs = [s for s in pools[side] if s not in used[side]][: a.size]
+                sigs = [s for s in _IO_ORDER if s not in used[side]][: a.size]
+                if len(sigs) < a.size:
+                    raise Unsupported(f"@{a.name} has more words than there are signals")
             clash = used[side] & set(sigs)
             if clash or len(set(sigs)) != len(sigs):
-                raise Unsupported(f"I/O signal used twice on the {'INPUT' if side else 'OUTPUT'} net: {sorted(clash) or sigs}")
+                raise Unsupported(f"I/O signal used twice on the {side} net: {sorted(clash) or sigs}")
             used[side] |= set(sigs)
             bank.io = sigs
             out[a.name] = sigs
         return out
 
-    def build(self, inputs: Net | None, outputs: Net) -> None:
+    def _screen(self, bank: _Bank, width: int | None, x0: int) -> int:
+        """Place the lamp grid of a screen array from column ``x0``; return the next free column."""
+        a = bank.array
+        w = width or max(1, round(a.size**0.5))
+        rows = -(-a.size // w)
+        if rows > MAX_SCREEN_ROWS:
+            raise Unsupported(f"@{a.name}: {rows} rows of lamps; at most {MAX_SCREEN_ROWS} (pass a larger --screen-width)")
+        bank.screen = self.b.nl.net(RED, f"{a.name} lamps")
+        for i, sig in enumerate(bank.io):
+            r, c = divmod(i, w)
+            # Rows end 3 tiles above y = 0, leaving room for a row of substations.
+            lamp = Lamp(rgb=sig, label=f"{a.name}[{i}]", position=(x0 + c + 0.5, r - rows - 2 + 0.5))
+            self.b.place(lamp, (), None, "screen")
+            bank.screen.attach(lamp.inp)
+        return x0 + w + 1
+
+    def build(self, inputs: Net | None, outputs: Net, screen_width: int | None = None) -> None:
         """Place every word and its readers."""
         s_red = Sig(self.step, frozenset({RED}))
+        screen_x = 0
         for bank in self.banks.values():
             a = bank.array
             group = f"array {a.name}"
+            if bank.is_screen:
+                screen_x = self._screen(bank, screen_width, screen_x)
             for i, init in enumerate(a.init):
                 loop = self.b.nl.net(GREEN, f"{a.name}[{i}]")
                 bank.words.append(loop)
@@ -143,7 +179,7 @@ class Memory:
                     continue
                 if a.external:
                     pin = Arithmetic(Sig(VALUE, frozenset({GREEN})), "+", 0, bank.io[i], label=f"{a.name}[{i}] -> {bank.io[i]}")
-                    self.b.place(pin, (), outputs, group)
+                    self.b.place(pin, (), bank.screen if bank.is_screen else outputs, group)
                     loop.attach(pin.inp)
                 if a.readonly:
                     if init:
@@ -177,6 +213,9 @@ class Memory:
                     self.b.place(reader, (), port.result, group)
                     port.address.attach(reader.inp)
                     loop.attach(reader.inp)
+
+
+MAX_SCREEN_ROWS = 16  # two rows of substations power at most this many
 
 
 # Default I/O signals: digits, then letters, then the rest.

@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 
 from .frontend import Array, Block, Function, Op, Operand, Unsupported, Value
 from .lower import PRIVATE_CONSTANT, Lowered, Wire, _Builder, _colors, _depth, _Lowerer, _operand
-from .netlist import GREEN, RED, Arithmetic, Cond, Connector, Constant, Decider, Lamp, Net, Netlist, Out, Sig
+from .netlist import GREEN, RED, Arithmetic, Cond, Connector, Constant, Decider, Message, Net, Netlist, Out, Panel, Sig
 from .memory import ADDRESS, ENABLE, VALUE, Memory, Ptr
 from .schedule import GATE_TO_LATCH, BlockSchedule, Jump, Load, Register, Schedule, Store, Test, Write
 from .signals import EACH
@@ -55,7 +55,7 @@ class SteppedCompiled:
     reset: Constant
     schedule: Schedule
     output: Connector  # the OUTPUT terminal: result and signal-check = 1 once halted, plus output arrays
-    done: Lamp  # lights once halted
+    status: Panel  # display panel: "reset", "running" or "done"
     inputs: Constant | None = None  # the INPUT terminal, if the program reads extern arrays
     io: dict[str, list[str]] = field(default_factory=dict)  # extern array -> signal per word
     last_ticks: int = 0
@@ -78,9 +78,10 @@ class SteppedCompiled:
 
 
 class _CfgLowerer(_Lowerer):
-    def __init__(self, fn: Function, io: dict[str, list[str]] | None = None) -> None:
+    def __init__(self, fn: Function, io: dict[str, list[str]] | None = None, screen_width: int | None = None) -> None:
         super().__init__(fn)
         self.io_choice = io or {}
+        self.screen_width = screen_width
         self.step = self.b.reserve(STEP)
         self.local: dict[int, Lowered] = {}
         self.regs: dict[int, Register] = {}  # value id -> register
@@ -315,7 +316,7 @@ class _CfgLowerer(_Lowerer):
             self._emit_register(r, schedule.latch_steps(r))
         halt = schedule.halt
 
-        # I/O: an OUTPUT terminal with the result once halted, a done lamp, and
+        # I/O: an OUTPUT terminal with the result once halted, a status panel, and
         # memory-mapped extern arrays (INPUT terminal only if something reads one).
         self.b.group = "io"
         output = self.b.nl.net(RED, "OUTPUT")
@@ -326,14 +327,23 @@ class _CfgLowerer(_Lowerer):
             label="result to OUTPUT once halted",
         )
         self.b.place(port, (RED,), output)
-        done = self.b.place(Lamp(self._ge(halt), label="done"), (RED,))
+        s = Sig(self.step, frozenset({RED}))
+        status = Panel(
+            [
+                Message(self._ge(halt), "signal-check", "done"),
+                Message(Cond(s, "<=", 1), "signal-deny", "reset"),
+                Message(Cond(s, ">", 1), "signal-hourglass", "running"),
+            ],
+            label="status",
+        )
+        self.b.place(status, (RED,))
         inputs, in_terminal, io = None, None, {}
         if self.mem is not None:
             io = self.mem.assign_io(self.io_choice, {result.signal, DONE})
             if any(bank.is_input for bank in self.mem.banks.values()):
                 inputs = self.b.nl.net(RED, "INPUT")
                 in_terminal = self.b.place(Constant({}, label="INPUT: wire the factory here"), (), inputs)
-            self.mem.build(inputs, output)
+            self.mem.build(inputs, output, self.screen_width)
         unknown = set(self.io_choice) - set(io)
         if unknown:
             raise Unsupported(f"--io names no extern array: {sorted(unknown)}")
@@ -345,7 +355,7 @@ class _CfgLowerer(_Lowerer):
         steps = {bs.name: (bs.base, bs.jump) for bs in sched}
         return SteppedCompiled(
             self.fn.name, self.b.nl, params, param_signals, result.signal, halt, self.b.bus.probe, steps, self.names,
-            reset, schedule, out_terminal.out, done, in_terminal, io,
+            reset, schedule, out_terminal.out, status, in_terminal, io,
         )
 
     def _ge(self, k: int) -> Cond:
@@ -419,5 +429,5 @@ def _name(v: Operand) -> str:
     return f"%{v.name}" if isinstance(v, Value) else ""
 
 
-def lower_cfg(fn: Function, io: dict[str, list[str]] | None = None) -> SteppedCompiled:
-    return _CfgLowerer(fn, io).run()
+def lower_cfg(fn: Function, io: dict[str, list[str]] | None = None, screen_width: int | None = None) -> SteppedCompiled:
+    return _CfgLowerer(fn, io, screen_width).run()

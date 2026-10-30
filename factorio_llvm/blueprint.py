@@ -22,6 +22,8 @@ from .netlist import (
     Connector,
     Constant,
     Lamp,
+    Message,
+    Panel,
     Decider,
     Entity,
     Pole,
@@ -98,6 +100,17 @@ def _cond(i: int, c: Cond) -> dict[str, Any]:
     return d
 
 
+def _plain_cond(c: Cond) -> dict[str, Any]:
+    """A lamp or panel condition: these read both wires, so no network flags."""
+    return {k: v for k, v in _cond(0, c).items() if not k.endswith("_networks")}
+
+
+def _cond_in(c: dict[str, Any]) -> Cond:
+    right = _sig_in(c["second_signal"], None) if "second_signal" in c else int(c.get("constant", 0))
+    cmp = _CMP_FROM_GAME.get(c.get("comparator", "<"), c.get("comparator", "<"))
+    return Cond(_sig_in(c["first_signal"], None), cmp, right)
+
+
 def _control_behavior(e: Entity) -> dict[str, Any]:
     if isinstance(e, Constant):
         filters = [
@@ -120,8 +133,16 @@ def _control_behavior(e: Entity) -> dict[str, Any]:
     if isinstance(e, Pole):
         return {}
     if isinstance(e, Lamp):
-        cond = {k: v for k, v in _cond(0, e.condition).items() if not k.endswith("_networks")}
-        return {"circuit_enabled": True, "circuit_condition": cond}
+        if e.rgb is not None:
+            return {"use_colors": True, "color_mode": 2, "rgb_signal": _signal(e.rgb)}
+        assert e.condition is not None
+        return {"circuit_enabled": True, "circuit_condition": _plain_cond(e.condition)}
+    if isinstance(e, Panel):
+        return {
+            "parameters": [
+                {"condition": _plain_cond(m.condition), "icon": _signal(m.icon), "text": m.text} for m in e.messages
+            ]
+        }
     if isinstance(e, Decider):
         dc: dict[str, Any] = {
             "conditions": [_cond(i, c) for i, c in enumerate(e.conditions)],
@@ -133,7 +154,7 @@ def _control_behavior(e: Entity) -> dict[str, Any]:
     raise TypeError(type(e).__name__)
 
 
-_PROTOTYPE = {Lamp: "small-lamp", Pole: "substation", Constant: "constant-combinator", Arithmetic: "arithmetic-combinator", Decider: "decider-combinator"}
+_PROTOTYPE = {Panel: "display-panel", Lamp: "small-lamp", Pole: "substation", Constant: "constant-combinator", Arithmetic: "arithmetic-combinator", Decider: "decider-combinator"}
 
 
 def _position(e: Entity, slot: int) -> tuple[float, float]:
@@ -142,13 +163,13 @@ def _position(e: Entity, slot: int) -> tuple[float, float]:
     col, row = slot % COLUMNS, slot // COLUMNS
     # Two-tile combinators face north (input south, output north); a 1x1
     # constant combinator sits in the top tile of its slot.
-    if isinstance(e, (Constant, Lamp)):
+    if isinstance(e, (Constant, Lamp, Panel)):
         return (col + 0.5, row * 3 + 0.5)
     return (col + 0.5, row * 3 + 1.0)
 
 
 def _connector_id(c: Connector, color: Color) -> int:
-    if isinstance(c.entity, (Constant, Pole, Lamp)):
+    if isinstance(c.entity, (Constant, Pole, Lamp, Panel)):
         return 1 if color == RED else 2
     base = 1 if c.side == "in" else 3
     return base + (0 if color == RED else 1)
@@ -225,10 +246,12 @@ def _entity_in(d: dict[str, Any]) -> Entity:
     label = d.get("player_description", "")
     name = d["name"]
     if name == "small-lamp":
-        c = cb["circuit_condition"]
-        right = _sig_in(c["second_signal"], None) if "second_signal" in c else int(c.get("constant", 0))
-        cmp = _CMP_FROM_GAME.get(c.get("comparator", "<"), c.get("comparator", "<"))
-        return Lamp(Cond(_sig_in(c["first_signal"], None), cmp, right), label=label, position=pos)
+        if cb.get("use_colors") and cb.get("color_mode") == 2:
+            return Lamp(rgb=cb["rgb_signal"]["name"], label=label, position=pos)
+        return Lamp(_cond_in(cb["circuit_condition"]), label=label, position=pos)
+    if name == "display-panel":
+        msgs = [Message(_cond_in(m["condition"]), m["icon"]["name"], m.get("text", "")) for m in cb.get("parameters", [])]
+        return Panel(msgs, label=label, position=pos)
     if name == "constant-combinator":
         signals: dict[str, int] = {}
         for section in cb.get("sections", {}).get("sections", []):
