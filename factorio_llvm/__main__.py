@@ -1,6 +1,8 @@
 """Command line: compile a C or LLVM IR function to a Factorio blueprint.
 
     python -m factorio_llvm examples/m1.c --function mix --args 3 4
+
+Without --function, it compiles main, or the only function in the file.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from .lower import lower
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="factorio_llvm", description=__doc__.splitlines()[0])
     p.add_argument("source", type=Path, help=".c file (compiled with clang -O2) or .ll file")
-    p.add_argument("--function", "-f", help="function to compile (default: the only one)")
+    p.add_argument("--function", "-f", help="function to compile (default: main, else the only one)")
     p.add_argument("--args", type=int, nargs="*", default=None, help="argument values to simulate and bake in")
     p.add_argument(
         "--io",

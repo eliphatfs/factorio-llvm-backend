@@ -179,9 +179,13 @@ def read_function(ir_text: str, name: str | None = None) -> Function:
     module.verify()
     defined = [f for f in module.functions if not f.is_declaration]
     if name is None:
-        if len(defined) != 1:
-            raise Unsupported(f"module defines {len(defined)} functions; pass the function name")
-        fn = defined[0]
+        mains = [f for f in defined if f.name == "main"]
+        if mains:
+            fn = mains[0]
+        elif len(defined) == 1:
+            fn = defined[0]
+        else:
+            raise Unsupported(f"module defines {len(defined)} functions and no main; pass the function name")
     else:
         fn = module.get_function(name)
 
@@ -277,8 +281,9 @@ def read_function(ir_text: str, name: str | None = None) -> Function:
                 block.term = Term("switch", [target(refs[1])], operand(refs[0], text), list(zip(vals, dests)), text=text)
                 break
             if opc == "ret":
-                if len(refs) != 1:
-                    raise Unsupported(f"void return: {text}")
+                if not refs:  # void: the result reads 0
+                    block.term = Term("ret", value=0, text=text)
+                    break
                 if str(refs[0].type) != "i32" and str(refs[0].type) != "i1":
                     raise Unsupported(f"only i32 and i1 results are supported: {text}")
                 block.term = Term("ret", value=operand(refs[0], text), text=text)
