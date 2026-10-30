@@ -21,6 +21,7 @@ M0 (infrastructure), M1 (straight-line functions) and M2 (control flow) are in p
 | `factorio_llvm/frontend.py` | Reads LLVM IR with llvmlite (or C via clang) into a small dataflow IR |
 | `factorio_llvm/lower.py` | Lowers a single-block i32 function to a combinator pipeline |
 | `factorio_llvm/cfg.py` | Lowers functions with branches and loops to a stepped circuit |
+| `factorio_llvm/schedule.py` | The step schedule: per block, its steps, register writes and jumps (`--schedule` prints it) |
 | `factorio_llvm/layout.py` | Places combinators in substation cells and routes nets as wires |
 
 M1 supports one basic block of i1/i32 code: `add sub mul sdiv srem shl ashr lshr

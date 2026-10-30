@@ -154,3 +154,14 @@ def test_large_program_is_laid_out_and_routed(tmp_path):
     sim.run_until(lambda s: s.read(bus, STEP) == c.halt)
     sim.step()
     assert sim.read(bus, c.result) == want
+
+
+def test_schedule_of_gcd(ir):
+    c = lower(read_function(ir, "gcd"))
+    s = c.schedule
+    assert [b.name for b in s.blocks] == list(c.blocks)
+    body = s.block("while.body")
+    back = [j for j in body.jumps if j.target == "while.body"]
+    assert len(back) == 1 and back[0].step + 1 + back[0].delta == body.base  # the loop's back edge
+    assert all(w.step == body.gate for w in body.writes)
+    assert "goto while.body" in str(s)

@@ -20,6 +20,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("source", type=Path, help=".c file (compiled with clang -O2) or .ll file")
     p.add_argument("--function", "-f", help="function to compile (default: the only one)")
     p.add_argument("--args", type=int, nargs="*", default=None, help="argument values to simulate and bake in")
+    p.add_argument("--schedule", action="store_true", help="print the step schedule of a function with control flow")
     p.add_argument("--no-blueprint", action="store_true", help="do not print the blueprint string")
     ns = p.parse_args(argv)
 
@@ -42,6 +43,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  result -> {compiled.result} (valid once S = {compiled.halt})", file=sys.stderr)
     elif not isinstance(compiled.result, int):
         print(f"  result -> {compiled.result.signal}", file=sys.stderr)
+    if stepped and ns.schedule:
+        print(compiled.schedule, file=sys.stderr)
     if ns.args is not None:
         value = compiled.run(*ns.args)
         took = f" after {compiled.last_ticks} ticks" if stepped else ""
