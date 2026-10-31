@@ -134,7 +134,7 @@ def _key(v) -> int:
     return ctypes.cast(v._ptr, ctypes.c_void_p).value
 
 
-_ICMP = re.compile(r"\bicmp\s+(\w+)")
+_ICMP = re.compile(r"\bicmp\s+(?:samesign\s+)?(\w+)")  # samesign only adds a promise
 _INTRINSIC = re.compile(r"@llvm\.(\w+)\.i\d+\(")
 INTRINSICS = {"smax", "smin", "umax", "umin", "abs"}
 _CASE = re.compile(r"i\d+ (-?\d+), label")
