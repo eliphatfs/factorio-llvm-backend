@@ -43,6 +43,9 @@ HALT = "<halt>"  # jump target name for the halt step
 FIRST_STEP = 2
 
 
+WARM_UP = 4  # ticks in reset before a simulated run
+
+
 @dataclass
 class SteppedCompiled:
     function: str
@@ -58,7 +61,8 @@ class SteppedCompiled:
     schedule: Schedule
     output: Connector  # the OUTPUT terminal: result and signal-check = 1 once halted, plus output arrays
     status: Panel  # display panel: "reset", "running" or "done"
-    inputs: Constant | None = None  # the INPUT terminal, if the program reads extern arrays
+    inputs: Constant | None = None  # the (first) INPUT terminal, if the program reads extern arrays
+    input_terminals: dict[str, Constant] = field(default_factory=dict)  # input array -> its terminal
     io: dict[str, list[str]] = field(default_factory=dict)  # extern array -> signal per word
     last_ticks: int = 0
 
@@ -72,8 +76,12 @@ class SteppedCompiled:
             raise TypeError(f"@{self.function} takes {len(self.params)} arguments")
         for c, sig, a in zip(self.params, self.param_signals, args):
             c.signals = {sig: wrap(a)}
-        self.reset.enabled = False
+        # As in game: the blueprint sits in reset for a while (so the input
+        # snapshots fill), then RESET is switched off.
+        self.reset.enabled = True
         sim = Simulator(self.netlist)
+        sim.step(WARM_UP)
+        self.reset.enabled = False
         self.last_ticks = sim.run_until(lambda s: s.read(self.bus, STEP, [RED]) == self.halt, max_ticks)
         sim.step()  # the result register shows its value on the bus one tick after halting
         return sim.read(self.bus, self.result, [RED])
@@ -92,8 +100,9 @@ class _CfgLowerer(_Lowerer):
         self.writes = self.b.nl.net(GREEN, "register writes")
         self.registers: list[Register] = []
         self.mem = Memory(self.b, self.step, fn.arrays) if fn.arrays else None
+        self.input_terminals: dict[str, Constant] = {}
         self.written = {a.name for b in fn.blocks for o in b.ops if o.opcode in ("store", "clear") for a in [_array_of(o)] if a}
-        self.direct_reads: list[tuple[Arithmetic, Array, int]] = []
+        self.direct_reads: list[tuple[Arithmetic, Array, int, str]] = []
         self.loads: list[Load] = []  # the current block's, while lowering it
         self.stores: list[Store] = []
         self.copies: dict[int, tuple[Register, str]] = {}  # phi -> (copy register, phi's block)
@@ -135,7 +144,7 @@ class _CfgLowerer(_Lowerer):
                 out = self.b.local_signal()
                 copy = Arithmetic(Sig(EACH, frozenset({RED})), "+", 0, out, label=f"{op.text} (direct)")
                 self.b.place(copy, (), GREEN)
-                self.direct_reads.append((copy, ptr.array, ptr.index))
+                self.direct_reads.append((copy, ptr.array, ptr.index, self.cur))
                 return Wire(out, 1, early=STABLE, vary=-STABLE)
             port = sum(1 for x in self.loads if x.array == ptr.array.name)
             self.loads.append(Load(ptr.array.name, port, ptr.index, _name(op.args[0])))
@@ -462,18 +471,29 @@ class _CfgLowerer(_Lowerer):
                 # Every input word starts at 0 here: set it in the terminal, or
                 # wire the factory to it.
                 inputs = self.b.nl.net(RED, "INPUT")
-                zeros = {sig: 0 for b in ins for sig in b.io}
-                label = "INPUT: wire the factory here, or set values here.\n" + _io_lines(ins)
-                in_terminal = self.b.place(Constant(zeros, label=label), (), inputs)
-                self._tag(in_terminal.out, "INPUT", "signal-I")
+                # One terminal for one input array; with several, one each (all
+                # on the INPUT net), so each can be set on its own, e.g. by
+                # pasting a blueprint of a constant combinator onto it.
+                groups = [ins] if len(ins) == 1 else [[b] for b in ins]
+                for g in groups:
+                    zeros = {sig: 0 for b in g for sig in b.io}
+                    name = "INPUT" if len(groups) == 1 else f"INPUT @{g[0].array.name}"
+                    label = f"{name}: wire the factory here, or set values here.\n" + _io_lines(g)
+                    terminal = self.b.place(Constant(zeros, label=label), (), inputs)
+                    if in_terminal is None:  # one panel marks the input area
+                        self._tag(terminal.out, "INPUT", "signal-I")
+                    in_terminal = in_terminal or terminal
+                    for b in g:
+                        self.input_terminals[b.array.name] = terminal
             outs = [b for b in banks if b.array.external and b.side == "OUTPUT"]
             if outs:
                 out_terminal.label += "\n" + _io_lines(outs)
             self.mem.build(inputs, output, self.screen_width)
-            for copy, arr, i in self.direct_reads:
+            for copy, arr, i, _ in self.direct_reads:
                 bank = self.mem.bank(arr)
                 copy.left = Sig(bank.io[i], frozenset({RED}))
                 (self.mem.joystick if bank.is_joystick else self.mem.clock if bank.is_clock else inputs).attach(copy.inp)
+            self._snapshot_inputs(sched, inputs)
         unknown = set(self.io_choice) - set(io)
         if unknown:
             raise Unsupported(f"--io names no extern array: {sorted(unknown)}")
@@ -485,8 +505,56 @@ class _CfgLowerer(_Lowerer):
         steps = {bs.name: (bs.base, bs.jump) for bs in sched}
         return SteppedCompiled(
             self.fn.name, self.b.nl, params, param_signals, result.signal, halt, self.b.bus.probe, steps, self.names,
-            reset, schedule, out_terminal.out, status, in_terminal, io,
+            reset, schedule, out_terminal.out, status, in_terminal, self.input_terminals, io,
         )
+
+    def _snapshot_inputs(self, sched: list[BlockSchedule], inputs: Net | None) -> None:
+        """Hold the INPUT terminal and the joystick still while a block reads them.
+
+        A live input can change at any tick, and a block computing from it
+        would then mix values from before and after the change (its paths are
+        not all the same length). So reads go through a snapshot instead: it
+        follows the live input except while S is inside a block that reads
+        it (from its first step to the one before its jump), when it holds.
+        A block thus sees the input as it was a tick or two before it started,
+        with no extra latency; a loop's next iteration sees a fresh value."""
+        assert self.mem is not None
+        readers: dict[int, list[Arithmetic]] = {}  # live net -> its copies
+        nets = {id(n): n for n in (inputs, getattr(self.mem, "joystick", None)) if n is not None}
+        blocks: dict[int, set[str]] = {}
+        for copy, arr, _, block in self.direct_reads:
+            bank = self.mem.bank(arr)
+            if bank.is_input or bank.is_joystick:
+                net = self.mem.joystick if bank.is_joystick else inputs
+                readers.setdefault(id(net), []).append(copy)
+                blocks.setdefault(id(net), set()).add(block)
+        for copy, bank in self.mem.input_copies:
+            if bank.is_input or bank.is_joystick:
+                net = self.mem.joystick if bank.is_joystick else inputs
+                readers.setdefault(id(net), []).append(copy)
+                blocks.setdefault(id(net), set()).update(bs.name for bs in sched for ld in bs.loads if ld.array == bank.array.name)
+        s = Sig(self.step, frozenset({RED}))
+        for key, copies in readers.items():
+            live = nets[key]
+            ranges = sorted((bs.base, bs.jump - 1) for bs in sched if bs.name in blocks.get(key, ()))
+            if not ranges:
+                continue
+            hold: list[Cond] = []
+            for lo, hi in ranges:
+                hold += [Cond(s, ">=", lo, join="or" if hold else "and"), Cond(s, "<=", hi)]
+            fresh = self.b.nl.net(GREEN, f"{live.name} (copy)")
+            snap = self.b.nl.net(GREEN, f"{live.name} snapshot")
+            self.b.place(Arithmetic(Sig(EACH, frozenset({RED})), "+", 0, EACH, label=f"{live.name} -> snapshot"), (), fresh)
+            fresh_copy = fresh.members[-1].entity
+            live.attach(fresh_copy.inp)
+            holder = self.b.place(Decider(hold, [Out(EACH, networks=GREEN)], label=f"{live.name} snapshot: hold"), (RED,), snap)
+            snap.attach(holder.inp)
+            sampler = self.b.place(Decider(hold, [], else_outputs=[Out(EACH, networks=GREEN)], label=f"{live.name} snapshot: follow"), (RED,), snap)
+            fresh.attach(sampler.inp)
+            for copy in copies:
+                live.members.remove(copy.inp)
+                snap.attach(copy.inp)
+                copy.left = Sig(copy.left.name, frozenset({GREEN}))
 
     def _ge(self, k: int) -> Cond:
         return Cond(Sig(self.step, frozenset({RED})), ">=", k)

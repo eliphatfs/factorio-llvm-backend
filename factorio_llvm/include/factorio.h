@@ -8,8 +8,8 @@
  * Joystick
  *   extern volatile int joystick[8], read-only. joystick[d] is 1 while the
  *   player walks towards direction d (JOY_N .. JOY_NW), else 0. Diagonals
- *   are their own entries, not N + E. In game it is a 3x2 walled cage above and
- *   left of the screen, with 8 sensor gates 7 tiles out around it: switch on
+ *   are their own entries, not N + E. In game it is a 3x2 walled cage left of
+ *   the circuit, below the screen, with 8 sensor gates 7 tiles out around it: switch on
  *   the constant combinator tagged "JOYSTICK" to open the cage's door, step
  *   onto the middle tile, switch it off, then hold WASD to lean towards a gate.
  *   Signals: up-arrow, up-right-arrow, right-arrow, down-right-arrow,

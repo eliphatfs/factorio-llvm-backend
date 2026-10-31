@@ -126,3 +126,29 @@ def test_lamps_are_always_on(ir):
     c = lower(read_function(ir, "draw"))
     lamps = [e for e in to_blueprint(c.netlist)["blueprint"]["entities"] if e["name"] == "small-lamp"]
     assert lamps and all(e["always_on"] for e in lamps)
+
+
+def test_input_change_mid_block_does_not_tear():
+    """A block reading an input sees one value, old or new, never a mix."""
+    from factorio_llvm.cfg import STEP, WARM_UP
+    from factorio_llvm.frontend import compile_c, read_function
+    from factorio_llvm.lower import lower
+    from factorio_llvm.netlist import RED
+    from factorio_llvm.sim import Simulator
+
+    src = "extern volatile int x[1]; int f(void) { int v = x[0]; return (v == 1) * 10 + (v == 2) * 20 + v * 100; }"
+    for flip in range(12):
+        c = lower(read_function(compile_c(src), "f"), {"x": ["signal-X"]})
+        term = c.input_terminals["x"]
+        term.signals = {"signal-X": 1}
+        sim = Simulator(c.netlist)
+        sim.step(WARM_UP)
+        c.reset.enabled = False
+        for t in range(200):
+            if t == flip:
+                term.signals = {"signal-X": 2}
+            if sim.read(c.bus, STEP, [RED]) == c.halt:
+                break
+            sim.step()
+        sim.step()
+        assert sim.read(c.bus, c.result, [RED]) in (110, 220), flip

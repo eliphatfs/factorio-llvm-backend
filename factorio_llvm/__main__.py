@@ -34,6 +34,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--schedule", action="store_true", help="print the step schedule of a function with control flow")
     p.add_argument("--unroll", type=int, default=1, help="unroll every loop N times (default: only #pragma unroll loops)")
     p.add_argument("--emit-llvm", action="store_true", help="print the LLVM IR clang produced and stop")
+    p.add_argument("--no-sim", action="store_true", help="bake --args into the blueprint without simulating (for programs that run for a long time)")
+    p.add_argument(
+        "--layout",
+        choices=("dense", "sparse"),
+        default="dense",
+        help="dense (default): pack tightly, spread out and retry if routing fails; sparse: one try, always routes, ~50x the area",
+    )
     p.add_argument("--no-blueprint", action="store_true", help="do not print the blueprint string")
     p.add_argument("--no-copy", action="store_true", help="do not copy the blueprint string to the clipboard")
     ns = p.parse_args(argv)
@@ -82,14 +89,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {side}: @{name}[i] = " + ", ".join(sigs), file=sys.stderr)
     if stepped and ns.schedule:
         print(compiled.schedule, file=sys.stderr)
-    if ns.args is not None:
+    if ns.args is not None and ns.no_sim:
+        if len(ns.args) != len(compiled.params):
+            print(f"error: @{compiled.function} takes {len(compiled.params)} arguments", file=sys.stderr)
+            return 1
+        for c, sig, a in zip(compiled.params, compiled.param_signals, ns.args):
+            c.signals = {sig: a}
+    elif ns.args is not None:
         value = compiled.run(*ns.args)
         took = f" after {compiled.last_ticks} ticks" if stepped else ""
         print(f"  simulated result: {value}{took}", file=sys.stderr)
     if stepped:
         compiled.reset.enabled = True  # place it held in reset; switch off to run
     if not ns.no_blueprint:
-        bp = export_string(compiled.netlist, f"@{compiled.function}")
+        bp = export_string(compiled.netlist, f"@{compiled.function}", ns.layout)
         print(bp)
         if not ns.no_copy and sys.stdout.isatty():
             tool = copy_to_clipboard(bp)

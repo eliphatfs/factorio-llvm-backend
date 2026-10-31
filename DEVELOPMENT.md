@@ -93,12 +93,28 @@ free-running game-tick counter) with
 docs and helpers: define `SCREEN_W`/`SCREEN_H` first for `screen[]` (its width
 also sets the lamp layout), plus `RGB()` and colour names. `joystick[8]` is an
 8-direction joystick (`JOY_N` .. `JOY_NW`, or `joy_dx()`/`joy_dy()`): a cage
-of a 3x2 cage (five walls and a door gate below), above and left of the screen, with 8 shut sensor gates 7 tiles
+of a 3x2 cage (five walls and a door gate below), below the screen and left of the circuit, with 8 shut sensor gates 7 tiles
 around it. Switch on the tagged constant to open the cage's door, stand on the
 middle tile, switch it off, then hold WASD: leaning towards a gate trips its
 sensor, and its wall reports that arrow signal. See `examples/joystick.c`. Gate orientation and the
 wall's circuit settings follow an in-game experiment but the exported
 blueprint is untested in game.
+
+Input reads are latched (`_snapshot_inputs` in cfg.py). The joystick and
+input-terminal nets are copied to a green snapshot net, held by a decider
+while S is inside any block that reads them ([base, jump-1]) and following
+the live value otherwise; every reader (direct reads and memory chunk copies)
+reads the snapshot. A block thus never mixes old and new state, adds no
+latency, and may see a value that changed during its own first tick only on
+the next read. `run()` steps `WARM_UP` ticks in reset so the snapshot is
+filled before the program starts; tests/test_io.py flips an input at every
+tick of a block to check it.
+
+A screen's memory chunks (395 lamps each) are placed in strips beside the
+screen, level with their lamps (`Memory._beside_screen`), so each chunk's loop
+stays local. Before, every chunk's loop had to leave the screen through the
+ring of substations, which carry one net per colour each, and beyond about 30
+chunks routing failed.
 
 ## Calibration against the game
 

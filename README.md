@@ -74,6 +74,8 @@ can paste it straight into the game.
 | `--unroll N` | unroll every loop N times (default: only `#pragma unroll` loops) |
 | `--schedule` | print the step schedule of a function with control flow |
 | `--emit-llvm` | print the LLVM IR clang produced and stop |
+| `--no-sim` | bake `--args` into the blueprint without simulating (for programs that run a long time) |
+| `--layout dense\|sparse` | `dense` (default) packs tightly and spreads out if routing fails; `sparse` places one combinator per cell and routes in one try, at about 50 times the area |
 | `--no-blueprint` | do not print the blueprint string |
 | `--no-copy` | do not copy the blueprint to the clipboard |
 
@@ -106,16 +108,23 @@ Start with `#include <factorio.h>` (found automatically). It declares:
   wire (declare it `volatile` so clang re-reads it). One it writes is an
   output, every word shown on the OUTPUT terminal. Pick the signals with
   `--io`, e.g. `--io in=iron-plate,copper-plate`. See `examples/m4.c`.
+  With several input arrays, each gets its own terminal (a constant
+  combinator described `INPUT @name` with its signals in order), all next to
+  one INPUT panel, so each can be set separately, e.g. by pasting a blueprint
+  of a constant combinator onto it, which also works from remote view.
 - **Screen.** Define `SCREEN_W` and `SCREEN_H` before the include to get
   `screen[]`: a grid of lamps above the circuit, each word a packed `0xRRGGBB`
   colour (`RGB()` and colour names are provided). Any size works; large
   screens get substations inside to power them.
 - **Joystick.** `joystick[8]` (`JOY_N` .. `JOY_NW`, or `joy_dx()` /
-  `joy_dy()`) reads an 8-direction joystick built above and left of the
-  screen: a small cage with sensor gates around it. Switch on the tagged
+  `joy_dy()`) reads an 8-direction joystick built below the screen, left of
+  the circuit: a small cage with sensor gates around it. Switch on the tagged
   constant combinator to open the cage door, stand on the middle tile, switch
   it off, then hold WASD; leaning towards a gate trips its sensor. See
   `examples/joystick.c`. The joystick layout has not yet been tested in game.
+  Input reads (joystick and input terminals) are latched: a block that
+  reads an input sees one consistent value even if it changes mid-block (it
+  may be the value from up to a block ago, but costs no extra ticks).
 - **`ticks()`**, a free-running game-tick counter.
 
 ### Examples
@@ -126,7 +135,18 @@ python -m factorio_llvm examples/m2.c -f gcd --args 84 36
 python -m factorio_llvm examples/m4.c -f draw --args 3
 python -m factorio_llvm examples/joystick.c
 python -m factorio_llvm examples/allsignals.c   # one lamp per signal, to check signals in game
+python -m factorio_llvm examples/factory.c -f game --args 1000000000 --no-sim --io walk=signal-W --io hold=signal-H
 ```
+
+`examples/factory.c` is a small factory game on a 256x192 screen (32x24
+tiles): a chest of plates, an inserter, belts, and an engineer who walks
+and places belts and inserters. Two input terminals steer it, `walk` (0 stop,
+1 up, 2 right, 3 down, 4 left) and `hold` (0 nothing, 1 belt, 2 inserter,
+3 eraser); `examples/factory_buttons.txt` is a blueprint book with a page
+per setting to paste onto them. Redrawing a tile costs 24 ticks (all rows of
+all changed tiles run as one pipelined loop), so the first full screen takes
+about 19,000 ticks (5 minutes) and a frame then takes about 300 to 450 ticks
+on a 64x48 build. It exports in about 1.5 minutes.
 
 ## Credits
 

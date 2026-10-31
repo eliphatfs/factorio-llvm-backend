@@ -141,6 +141,11 @@ _INTRINSIC = re.compile(r"@llvm\.(\w+)\.i\d+\(")
 INTRINSICS = {"smax", "smin", "umax", "umin", "abs"}
 _CASE = re.compile(r"i\d+ (-?\d+), label")
 _GLOBAL = re.compile(r"^@([\w.$-]+) = .*?\b(global|constant) (\[(\d+) x i32\]|i32) (.*?)(?:, align \d+)?$")
+# An initialised array whose tail is zeros: clang emits a packed struct of the
+# written part and a zeroinitializer tail, e.g. <{ [512 x i32] [...], [64 x i32] zeroinitializer }>.
+_ZERO_TAIL = re.compile(
+    r"^@([\w.$-]+) = .*?\b(global|constant) <\{ ([^}]*) \}> <\{ (.*), \[(\d+) x i32\] zeroinitializer \}>(?:, align \d+)?$"
+)
 _EXTERN = re.compile(r"^@([\w.$-]+) = external .*?\bglobal (\[(\d+) x i32\]|i32)(?:, align \d+)?$")
 _ALLOCA = re.compile(r"alloca (\[(\d+) x i32\]|i32)(?=,|$)")
 _GEP = re.compile(r"getelementptr (?:inbounds |nuw |nusw )*(\[\d+ x i32\]|i32|i8), ptr")
@@ -157,6 +162,14 @@ def _global_array(text: str) -> Array | None:
         name, _, n = m.groups()
         size = int(n) if n else 1
         return Array(name, size, [0] * size, external=True)
+    m = _ZERO_TAIL.match(text)
+    if m:
+        name, kind, types, values, tail = m.groups()
+        size = sum(int(k) if k else 1 for k in re.findall(r"(?:\[(\d+) x )?i32", types))
+        init = [wrap(int(x)) for x in re.findall(r"i32 (-?\d+)", values)] + [0] * int(tail)
+        if len(init) != size:
+            raise Unsupported(f"global initializer: {text}")
+        return Array(name, len(init), init, readonly=kind == "constant")
     m = _GLOBAL.match(text)
     if not m:
         return None
