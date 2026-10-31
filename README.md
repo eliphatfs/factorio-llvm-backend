@@ -72,7 +72,7 @@ terminal. Signals default to `signal-0`, `signal-1`, ...; pick them with
 `--io in=iron-plate,copper-plate`. A written `extern` array named `screen...`
 is a lamp screen instead: a grid of lamps above the circuit, each showing its
 word as a packed `0xRRGGBB` colour (`--screen-width` sets the row length, at
-most 16 rows).
+any size; past 16 rows or columns a few 2x2 substations sit inside the screen to power it).
 
 `#include <factorio.h>` (found automatically) declares these devices (and `ticks()`, a
 free-running game-tick counter) with
