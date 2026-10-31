@@ -158,9 +158,44 @@ def _convert(fn: Function, preds: dict[str, list[str]]) -> bool:
     return False
 
 
+def _forces_equal(defs: dict[int, Op], c: Operand, holds: bool, t: Operand, f: Operand, depth: int = 0) -> bool:
+    """Whether ``c`` being ``holds`` means ``t == f``."""
+    if not isinstance(c, Value) or id(c) not in defs or depth > 8:
+        return False
+    op = defs[id(c)]
+    a = op.args
+    if op.opcode == "icmp" and op.predicate in ("eq", "ne") and {id(x) for x in a} == {id(t), id(f)}:
+        return holds == (op.predicate == "eq")
+    if op.opcode == "xor" and len(a) == 2 and a[1] == 1:
+        return _forces_equal(defs, a[0], not holds, t, f, depth + 1)
+    # and (select a, b, false): when it holds, both do; or (select a, true, b): when it fails, both do
+    parts = None
+    if op.opcode == "and" or (op.opcode == "select" and len(a) == 3 and a[2] == 0):
+        parts = [a[0], a[1]] if holds else None
+    if op.opcode == "or" or (op.opcode == "select" and len(a) == 3 and a[1] == 1):
+        parts = [a[0], a[1] if op.opcode == "or" else a[2]] if not holds else None
+    return bool(parts) and any(_forces_equal(defs, x, holds, t, f, depth + 1) for x in parts)
+
+
+def fold_same_selects(fn: Function) -> Function:
+    """``select c, t, f`` where c (or not c) forces t == f is just one side,
+    as after if-converting ``if (nx != x) x = nx``: x is then nx either way."""
+    defs = {id(op.result): op for b in fn.blocks for op in b.ops}
+    for b in fn.blocks:
+        for op in list(b.ops):
+            if op.opcode != "select" or op.result.width == 1:
+                continue
+            c, t, f = op.args
+            if _forces_equal(defs, c, False, t, f):
+                _replace(fn, op.result, t)
+            elif _forces_equal(defs, c, True, t, f):
+                _replace(fn, op.result, f)
+    return fn
+
+
 def simplify_cfg(fn: Function) -> Function:
     """If-convert and merge blocks until nothing changes."""
     while True:
         preds = _preds(fn)
         if not (_merge(fn, preds) or _convert(fn, preds)):
-            return fn
+            return fold_same_selects(fn)

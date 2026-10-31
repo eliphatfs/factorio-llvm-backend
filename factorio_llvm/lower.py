@@ -55,6 +55,16 @@ class Wire:
     signal: str
     depth: int
     color: Color = GREEN
+    early: int | None = None  # ticks along the shortest path from a changing input (None: = depth)
+    vary: int | None = None  # ticks along the longest path from a changing input (None: = depth)
+
+    @property
+    def lo(self) -> int:
+        return self.depth if self.early is None else self.early
+
+    @property
+    def hi(self) -> int:
+        return self.depth if self.vary is None else self.vary
 
 
 Lowered = Wire | int
@@ -163,6 +173,19 @@ def _depth(*vs: Lowered) -> int:
     return max((v.depth for v in vs if isinstance(v, Wire)), default=0)
 
 
+STABLE = 10**9  # ``early`` of a value that does not change while a block runs
+
+
+def _early(*vs: Lowered) -> int:
+    """The soonest a change of the block's inputs can reach any of ``vs``."""
+    return min((v.lo for v in vs if isinstance(v, Wire)), default=STABLE)
+
+
+def _vary(*vs: Lowered) -> int:
+    """The latest a change of the block's inputs can reach any of ``vs``."""
+    return max((v.hi for v in vs if isinstance(v, Wire) and v.lo < STABLE), default=-STABLE)
+
+
 class _Lowerer:
     def __init__(self, fn: Function) -> None:
         self.fn = fn
@@ -232,7 +255,7 @@ class _Lowerer:
                 self.b.place(Arithmetic(_operand(w), "*" if c != 1 else "+", c if c != 1 else 0, out, label=label), _colors(w), GREEN)
             if k:
                 self.b.place(Constant({out: k}, label=f"{label} (+ {k})"), (), GREEN)
-        return Wire(out, _depth(*x.terms) + 1)
+        return Wire(out, _depth(*x.terms) + 1, early=_early(*x.terms) + 1, vary=_vary(*x.terms) + 1)
 
     def _place_ors(self, x: Ors) -> Wire:
         level: list[Lowered] = list(x.parts)
@@ -244,7 +267,7 @@ class _Lowerer:
         out = self.b.local_signal()
         leaves = self._leaves(x)
         self.b.place(Decider(self._conds(x), [Out(out, copy=False, constant=1)], label=f"{out} = condition"), _colors(*leaves), GREEN)
-        return Wire(out, _depth(*leaves) + 1)
+        return Wire(out, _depth(*leaves) + 1, early=_early(*leaves) + 1, vary=_vary(*leaves) + 1)
 
     def _place_pieces(self, x: Pieces) -> Lowered:
         out = self.b.local_signal()
@@ -266,7 +289,7 @@ class _Lowerer:
                 else:
                     flag = self.real(g)
                     self.b.place(Arithmetic(_operand(v), "*", _operand(flag), out, label=f"{label} (value * guard)"), _colors(v, flag), GREEN)
-            return Wire(out, by_product)
+            return Wire(out, by_product, early=_early(*guards, *(v for _, v in cases)) + 1, vary=_vary(*guards, *(v for _, v in cases)) + 2)
         # Deciders cannot rename: each case passes its value under its own name
         # onto a private net, and Each + 0 sums that net into the result.
         private = self.b.nl.net(GREEN, f"cases {out}")
@@ -276,7 +299,7 @@ class _Lowerer:
         rename = Arithmetic(Sig(EACH, frozenset({GREEN})), "+", 0, out, label=f"{label} (rename)")
         self.b.place(rename, (), GREEN)
         private.attach(rename.inp)
-        return Wire(out, _depth(*guards, *(v for _, v in cases)) + 2)
+        return Wire(out, _depth(*guards, *(v for _, v in cases)) + 2, early=_early(*guards, *(v for _, v in cases)) + 2, vary=_vary(*guards, *(v for _, v in cases)) + 2)
 
     def lazy_op(self, op: Op):
         """``op`` as a lazy form, or NotImplemented to place it the plain way."""
@@ -399,7 +422,7 @@ class _Lowerer:
             return arith(op, a, b)
         out = self.b.local_signal()
         self.b.place(Arithmetic(_operand(a), op, _operand(b), out, label=label), _colors(a, b), GREEN)
-        return Wire(out, _depth(a, b) + 1)
+        return Wire(out, _depth(a, b) + 1, early=_early(a, b) + 1, vary=_vary(a, b) + 1)
 
     def compare(self, cmp: str, a: Lowered, b: Lowered, label: str) -> Lowered:
         if isinstance(a, int) and isinstance(b, int):
@@ -410,7 +433,7 @@ class _Lowerer:
         out = self.b.local_signal()
         dec = Decider([Cond(_operand(a), cmp, _operand(b))], [Out(out, copy=False, constant=1)], label=label)
         self.b.place(dec, _colors(a, b), GREEN)
-        return Wire(out, _depth(a, b) + 1)
+        return Wire(out, _depth(a, b) + 1, early=_early(a, b) + 1, vary=_vary(a, b) + 1)
 
     def select(self, c: Lowered, t: Lowered, f: Lowered, label: str) -> Lowered:
         if isinstance(c, int):
@@ -430,7 +453,7 @@ class _Lowerer:
         if isinstance(t, int) and isinstance(f, int):
             dec = Decider(cond, [Out(out, copy=False, constant=t)], [Out(out, copy=False, constant=f)], label=label)
             self.b.place(dec, _colors(a, b), GREEN)
-            return Wire(out, _depth(a, b) + 1)
+            return Wire(out, _depth(a, b) + 1, early=_early(a, b) + 1, vary=_vary(a, b) + 1)
 
         # Pass the chosen value under its own name onto a private net, then
         # rename it with Each + 0 onto the block's net.
@@ -445,7 +468,7 @@ class _Lowerer:
         rename = Arithmetic(Sig(EACH, frozenset({GREEN})), "+", 0, out, label=f"{label} (rename)")
         self.b.place(rename, (), GREEN)
         private.attach(rename.inp)
-        return Wire(out, _depth(a, b, t, f) + 2)
+        return Wire(out, _depth(a, b, t, f) + 2, early=_early(a, b, t, f) + 2, vary=_vary(a, b, t, f) + 2)
 
     def uge(self, a: Lowered, b: Lowered, label: str) -> Lowered:
         fa = self.arith("XOR", a, INT_MIN, f"{label} (flip a)")

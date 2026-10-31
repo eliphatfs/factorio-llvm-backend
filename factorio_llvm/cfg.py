@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 
 from .frontend import _array_of, Array, Block, Function, Op, Operand, Unsupported, Value
 from .fuse import Bool, pieces
-from .lower import GATE, PRIVATE_CONSTANT, Lowered, Wire, _Builder, _colors, _depth, _Lowerer, _operand
+from .lower import GATE, PRIVATE_CONSTANT, STABLE, Lowered, Wire, _Builder, _colors, _depth, _early, _Lowerer, _operand, _vary
 from .signals import EACH, rich_text
 from .netlist import GREEN, RED, Arithmetic, Cond, Connector, Constant, Decider, Message, Net, Netlist, Out, Panel, Sig
 from .memory import ADDRESS, Memory, Ptr
@@ -99,11 +99,13 @@ class _CfgLowerer(_Lowerer):
         self.copies: dict[int, tuple[Register, str]] = {}  # phi -> (copy register, phi's block)
         self.cur = ""  # the block being lowered
         self.gates: dict[tuple[int, int], str] = {}  # (block net, step) -> its flag signal
+        self.phi_block = {id(p.result): b.name for b in fn.blocks for p in b.phis}
+        self.chains: dict[int, list[str]] = {}  # pipelined block net -> its iteration flags
 
     # values: block-local combinators first, then registers and arguments
     def get_raw(self, a: Operand):
         if not isinstance(a, int) and id(a) in self.copies and self.copies[id(a)][1] != self.cur:
-            w = Wire(self.copies[id(a)][0].signal, 0, RED)
+            w = Wire(self.copies[id(a)][0].signal, 0, RED, early=STABLE, vary=-STABLE)
             return Ptr(a.array, w) if a.array is not None else w
         if isinstance(a, int):
             return a
@@ -112,7 +114,8 @@ class _CfgLowerer(_Lowerer):
         if id(a) in self.local:
             return self.local[id(a)]
         if id(a) in self.regs:
-            w = Wire(self.regs[id(a)].signal, 0, RED)
+            # Only the block's own phis change while it runs (see _pipeline).
+            w = Wire(self.regs[id(a)].signal, 0, RED, **_changing(self.phi_block.get(id(a)) == self.cur))
             return Ptr(a.array, w) if a.array is not None else w
         return self.env[id(a)]
 
@@ -133,7 +136,7 @@ class _CfgLowerer(_Lowerer):
                 copy = Arithmetic(Sig(EACH, frozenset({RED})), "+", 0, out, label=f"{op.text} (direct)")
                 self.b.place(copy, (), GREEN)
                 self.direct_reads.append((copy, ptr.array, ptr.index))
-                return Wire(out, 1)
+                return Wire(out, 1, early=STABLE, vary=-STABLE)
             port = sum(1 for x in self.loads if x.array == ptr.array.name)
             self.loads.append(Load(ptr.array.name, port, ptr.index, _name(op.args[0])))
             return self.mem.load_result(ptr.array, port, ptr.index, op.text)
@@ -262,6 +265,10 @@ class _CfgLowerer(_Lowerer):
         so at S = step one arithmetic ``v * flag`` both samples and renames. The
         block's first flag is GATE; stores of earlier waves get flags of their own.
         """
+        if getattr(self, "_gated_by", None):
+            g = Sig(self._gated_by, frozenset({GREEN}))
+            self.b.place(Arithmetic(g, "*", _operand(v), signal, label=label), _colors(v) | {GREEN}, net)
+            return
         key = (id(self.b.local), step)
         if key not in self.gates:
             mine = [s for (net, _), s in self.gates.items() if net == key[0]]
@@ -273,11 +280,30 @@ class _CfgLowerer(_Lowerer):
         pick = Arithmetic(g, "*", _operand(v), signal, label=label)
         self.b.place(pick, _colors(v) | {GREEN}, net)
 
+    def _iteration_flag(self, base: int, delay: int) -> str:
+        """A pipelined block's flag that is 1 for the one tick ``delay`` ticks
+        after each iteration starts (S = base), as a block-local signal."""
+        chain = self.chains.setdefault(id(self.b.local), [])
+        while len(chain) < delay:
+            sig = self.b.local_signal()
+            if not chain:
+                self.b.place(Decider([self._step_is(base)], [Out(sig, copy=False, constant=1)], label="iteration starts"), (RED,), GREEN)
+            else:
+                self.b.place(Arithmetic(Sig(chain[-1], frozenset({GREEN})), "+", 0, sig, label=f"iteration + {len(chain) + 1}"), (GREEN,), GREEN)
+            chain.append(sig)
+        return chain[delay - 1]
+
     def _emit_write(self, w: Write) -> None:
         self._gated(w.step, w.value, w.register.signal, self.writes, f"{w.label} (write at {w.step})")
 
-    def _emit_store(self, st: Store) -> None:
+    def _emit_store(self, st: Store, bs: BlockSchedule | None = None) -> None:
         assert self.mem is not None
+        if st.delay is not None:
+            assert bs is not None
+            flag = self._iteration_flag(bs.base + bs.prologue, st.delay)
+            self._gated_by = flag
+        else:
+            self._gated_by = None
         sig_a, sig_v, sig_e = self.mem.write_signals[st.port]
         if st.clear:
             e = st.enable if st.enable is not None else -st.array_id
@@ -337,7 +363,7 @@ class _CfgLowerer(_Lowerer):
             params.append(self.b.place(Constant({s: 0}, label=f"argument %{p.name} = {rich_text(s)}"), (), RED, group="arguments"))
             self.b.tag(params[-1].out, f"argument %{p.name}", s, group="arguments")
             param_signals.append(s)
-            self.env[id(p)] = Wire(s, 0, RED)
+            self.env[id(p)] = Wire(s, 0, RED, early=STABLE, vary=-STABLE)
             self.names[p.name] = s
 
         result = self._new_register("return value")
@@ -360,8 +386,9 @@ class _CfgLowerer(_Lowerer):
             last = max((st.wave for st in bs.stores), default=0)
             for st in bs.stores:
                 st.step = bs.gate - (last - st.wave)
+            self._pipeline(b, bs)
             sched.append(bs)
-            k = bs.jump + 1
+            k = bs.jump + 1 + bs.drain
         schedule = Schedule(sched, self.registers, result, halt=k)
 
         # Pass 2: the schedule's writes and jumps.
@@ -390,7 +417,8 @@ class _CfgLowerer(_Lowerer):
             for w in bs.writes:
                 self._emit_write(w)
             for st in bs.stores:
-                self._emit_store(st)
+                self._emit_store(st, bs)
+            self._gated_by = None
             for ld in bs.loads:
                 self._emit_load(ld, bs)
             for j in bs.jumps:
@@ -466,8 +494,67 @@ class _CfgLowerer(_Lowerer):
                 return b
         raise KeyError(name)
 
-    def _block_depth(self, b: Block) -> int:
-        """Ticks until everything the block hands on is valid."""
+    def _pipeline(self, b: Block, bs: BlockSchedule) -> None:
+        """Overlap the iterations of a one-block loop, if that is faster.
+
+        Normally an iteration takes the block's whole depth plus 2 (latch and
+        jump). But only the loop-carried values (phis), the branch and the
+        values kept for later must be ready by the latch; stores need not be.
+        Every combinator is a pipeline register, so iteration i + 1 can start
+        (the phis latch new values) while iteration i's stores are still on
+        their way down the circuit, as long as each store's inputs are still
+        from iteration i when it samples them.
+
+        The phis hold for II ticks, so a value is from one iteration from its
+        longest path (``depth``) until II ticks after its shortest (``early``)
+        from the phis. A store at ``k`` ticks into its iteration needs every
+        input inside that window: ``depth <= k < early + II``. Iteration
+        i + 1's stores must come after all of iteration i's (they may alias):
+        the stores' spread is less than II. A flag born at the iteration's
+        start runs down a chain of copies and fires each store at its tick.
+
+        Phis change every iteration, loop invariants and inputs do not, so II
+        counts only the paths from the phis (``vary``); the first iteration
+        waits ``prologue`` steps more for the rest to settle once.
+
+        On exit the loop's phis keep their last values, so the last
+        iterations' stores still see the right inputs; the exit waits
+        ``drain`` steps for them before the next block starts.
+        """
+        t = b.term
+        assert t is not None
+        if b.name not in t.targets or self.loads or not self.stores:
+            return
+        needed = self._needed(b)
+        ii = max(3, _vary(*needed) + 2)
+        ks: dict[int, int] = {}
+        before = 0
+        for wave in sorted({st.wave for st in self.stores}):
+            nxt = before
+            for st in (x for x in self.stores if x.wave == wave):
+                ins = [x for x in (st.address, st.value, st.enable) if x is not None]
+                ks[id(st)] = k = max(1, _vary(*ins), before + 1)
+                ii = max(ii, k - _early(*ins) + 1)
+                nxt = max(nxt, k)
+            before = nxt
+        ii = max(ii, max(ks.values()) - min(ks.values()) + 1)
+        # The first iteration also waits for what settles once (loop
+        # invariants, inputs): the prologue.
+        pro = max(0, _depth(*needed) - (ii - 2))
+        for st in self.stores:
+            ins = [x for x in (st.address, st.value, st.enable) if x is not None]
+            pro = max(pro, _depth(*ins) - ks[id(st)])
+        if ii >= bs.depth + 2:
+            return
+        bs.depth, bs.pipelined, bs.prologue = pro + ii - 2, True, pro
+        for st in self.stores:
+            st.delay = ks[id(st)]
+            st.step = bs.base + pro + st.delay
+        # The next block starts as if after a block whose stores are at the last delay.
+        bs.drain = max(0, max(ks.values()) + 2 - ii)
+
+    def _needed(self, b: Block) -> list[Lowered]:
+        """What the block hands on: kept values and its branch's inputs."""
         needed: list[Lowered] = []
         t = b.term
         assert t is not None
@@ -481,8 +568,13 @@ class _CfgLowerer(_Lowerer):
         for succ in t.targets + [d for _, d in t.cases]:
             for p in self._block(succ).phis:
                 needed += [self.get(v) for pred, v in p.incoming if pred == b.name]
+        return [x.index if isinstance(x, Ptr) else x for x in needed]
+
+    def _block_depth(self, b: Block) -> int:
+        """Ticks until everything the block hands on is valid."""
+        needed = self._needed(b)
         last = max((st.wave for st in self.stores), default=0)
-        depth = _depth(*(x.index if isinstance(x, Ptr) else x for x in needed))
+        depth = _depth(*needed)
         for st in self.stores:
             # Earlier waves go out (last - wave) steps before the gate, after
             # the GATE flag step (so at least one step into the block).
@@ -514,7 +606,18 @@ class _CfgLowerer(_Lowerer):
         label = f"{b.name}: {t.text.splitlines()[0]}"
 
         def offset(target: str) -> int:
+            if bs.drain and target != b.name:
+                return 0  # into the drain steps; their last one jumps on
+            if target == b.name:
+                return bs.base + bs.prologue - nxt  # past the prologue
             return (schedule.halt if target == HALT else schedule.block(target).base) - nxt
+
+        if bs.drain:
+            exits = [x for x in t.targets + [d for _, d in t.cases] if x != b.name]
+            if exits:
+                assert len(set(exits)) == 1
+                end = bs.jump + bs.drain
+                bs.jumps.append(Jump(end, [], schedule.block(exits[0]).base - (end + 1), exits[0], f"{b.name}: after the drain"))
 
         def go(target: str, tests: list[Test], note: str = "", when=None, minus: int = 0) -> None:
             bs.jumps.append(Jump(bs.jump, tests, offset(target) - minus, target, f"{label}{note}", when))
@@ -547,6 +650,11 @@ class _CfgLowerer(_Lowerer):
             go(t.targets[0], [Test(c, "!=", val, _name(t.cond)) for val, _ in t.cases], " (default)")
         else:
             raise Unsupported(f"terminator {t.kind}")
+
+
+def _changing(yes: bool) -> dict[str, int]:
+    """``early``/``vary`` of a register read in a block: 0 if it changes there."""
+    return {"early": 0, "vary": 0} if yes else {"early": STABLE, "vary": -STABLE}
 
 
 def _io_lines(banks) -> str:

@@ -65,7 +65,7 @@ from dataclasses import dataclass, field
 from .frontend import Array
 from .frontend import Unsupported
 from .layout import screen_poles
-from .lower import Lowered, Wire, _Builder
+from .lower import Lowered, Wire, _Builder, _early, _vary
 from .netlist import GREEN, RED, Color, Arithmetic, Cond, Constant, Decider, Gate, Lamp, Net, Out, Pole, Sig, Wall
 from .signals import EACH, allocatable_signals
 
@@ -165,7 +165,7 @@ class Memory:
         rename = Arithmetic(Sig(VALUE, frozenset({result.color})), "+", 0, out, label=f"{label} (data)")
         self.b.place(rename, (), GREEN)
         result.attach(rename.inp)
-        return Wire(out, _depth_of(address) + LOAD_LATENCY)
+        return Wire(out, _depth_of(address) + LOAD_LATENCY, early=_early(address) + LOAD_LATENCY, vary=_vary(address) + LOAD_LATENCY)
 
     def assign_io(self, chosen: dict[str, list[str]], taken_on_output: set[str]) -> dict[str, list[str]]:
         """Pick the I/O signal of every word of every external array."""
