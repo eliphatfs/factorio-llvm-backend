@@ -49,9 +49,10 @@ and closed-form loop exit values (`factorio_llvm.frontend.CLANG_FLAGS`).
 M3 supports fixed-size `i32` arrays: local (`alloca`) or global, with or
 without initial values, and constant globals as ROM tables. `getelementptr`,
 `load`, `store` and `memset` of a whole array to 0 are handled; i64 is accepted
-for indices and computed in 32 bits. Each word is one decider holding its value
-on a private loop; each read port adds a reader per word, and a load costs 4
-ticks on top of its address. A block is split after a store only when a later
+for indices and computed in 32 bits. Arrays are stored in chunks of 395 words (one per
+usable signal) on a private loop: a chunk costs about 5 combinators and each
+read port 2 more per chunk, whatever its size, and a load costs 5 ticks on top
+of its address. A block is split after a store only when a later
 store, or a load of the same array, follows it in the block, so a store takes
 effect before that load. Memory is cleared (or reset to its initial
 values) while `RESET` is on. Not supported: pointer arguments, pointers that

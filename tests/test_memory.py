@@ -24,6 +24,8 @@ int w[3] = {5, 6, 7};
 int bump(int i) { w[(unsigned)i % 3] += i; return w[0] * 10000 + w[1] * 100 + w[2]; }
 int g2[4];
 int peek(int a) { g2[0] = a; return g2[1] + g2[0]; }
+int big[800];
+int chunks(int a) { big[a] = a + 1; big[a + 400] = 7; big[799] = 5; return big[a] * 100 + big[a + 400] * 10 + big[799 - a % 2]; }
 int f3[4];
 int fill(int a) { for (int i = 0; i < 4; i++) f3[i] = a * i; return f3[3] - f3[1]; }
 int rev(int a, int b, int c) {
@@ -39,6 +41,7 @@ CASES = [
     ("bubble", lambda r: tuple(r.randint(0, 9) for _ in range(4))),
     ("histogram", lambda r: (r.randint(-9, 9), r.randint(-9, 9))),
     ("bump", lambda r: (r.randint(0, 9),)),
+    ("chunks", lambda r: (r.randint(0, 399),)),
     ("fill", lambda r: (r.randint(-9, 9),)),
     ("rev", lambda r: tuple(r.randint(0, 9) for _ in range(3))),
 ]

@@ -194,16 +194,19 @@ class _CfgLowerer(_Lowerer):
         dec = Decider(conds, [Out(self.step, copy=False, constant=j.delta)], label=j.label)
         self.b.place(dec, _colors(*(t.value for t in j.tests)) | {RED}, RED)
 
-    def _pass(self, conds: list[Cond], v: Lowered, signal: str, net: Net, label: str) -> None:
-        """While ``conds`` hold, a gate passes ``v``; an ``x + 0`` renames it to ``signal`` on ``net``."""
+    def _pass(self, conds: list[Cond], v: Lowered, signal: str, net: Net, label: str, add: int = 0) -> None:
+        """While ``conds`` hold, a gate passes ``v + add``; a rename puts it on ``net`` as ``signal``."""
         if isinstance(v, int):
-            out, picked = Out(PRIVATE_CONSTANT, copy=False, constant=v), PRIVATE_CONSTANT
+            outs = [Out(PRIVATE_CONSTANT, copy=False, constant=v + add)]
         else:
-            out, picked = Out(v.signal, networks=v.color), v.signal
-        gate = Decider(conds, [out], label=label)
+            outs = [Out(v.signal, networks=v.color)]
+            if add:
+                outs.append(Out(PRIVATE_CONSTANT, copy=False, constant=add))
+        gate = Decider(conds, outs, label=label)
         private = self.b.nl.net(GREEN, f"{label} (private)")
         self.b.place(gate, _colors(v) | {RED}, private)
-        rename = Arithmetic(Sig(picked, frozenset({GREEN})), "+", 0, signal, label=f"{label} (rename)")
+        # Each + 0 into one signal sums the private net: the value and the added constant.
+        rename = Arithmetic(Sig(EACH, frozenset({GREEN})), "+", 0, signal, label=f"{label} (rename)")
         private.attach(rename.inp)
         self.b.place(rename, (), net)
 
@@ -230,18 +233,18 @@ class _CfgLowerer(_Lowerer):
             self._gated(st.step, -st.array_id, ENABLE, self.b.bus, f"clear {st.array}")
             return
         label = f"store {st.array} at {st.step}"
-        for v, sig in ((st.address, ADDRESS), (st.value, VALUE), (st.array_id, ENABLE)):
+        # The address goes out as address + 1 (see memory.py): a second pulse adds the 1.
+        for v, sig in ((st.address, ADDRESS), (1, ADDRESS), (st.value, VALUE), (st.array_id, ENABLE)):
             if v != 0:
                 self._gated(st.step, v, sig, self.b.bus, f"{label} ({sig})")
 
     def _emit_load(self, ld: Load, bs: BlockSchedule) -> None:
         assert self.mem is not None
-        if ld.address == 0:
-            return  # an absent address reads word 0
         s = Sig(self.step, frozenset({RED}))
         window = [Cond(s, ">=", bs.base), Cond(s, "<=", bs.jump)]
         arr = next(a for a in self.fn.arrays if a.name == ld.array)
-        self._pass(window, ld.address, ADDRESS, self.mem.port(arr, ld.port).address, f"{bs.name}: {ld}")
+        # Addresses travel as address + 1 (see memory.py).
+        self._pass(window, ld.address, ADDRESS, self.mem.port(arr, ld.port).address, f"{bs.name}: {ld}", add=1)
 
     def _emit_register(self, r: Register, latch_steps: list[int]) -> None:
         if not latch_steps:
