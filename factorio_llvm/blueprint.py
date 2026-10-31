@@ -212,11 +212,11 @@ def power_links(netlist: Netlist) -> list[tuple[Pole, Pole]]:
     return links
 
 
-def to_blueprint(netlist: Netlist, label: str = "factorio-llvm") -> dict[str, Any]:
+def to_blueprint(netlist: Netlist, label: str = "factorio-llvm", layout: str = "dense") -> dict[str, Any]:
     if netlist.logical:
         from .layout import physical
 
-        netlist = physical(netlist)
+        netlist = physical(netlist, layout)
     numbers: dict[int, int] = {}
     entities = []
     for slot, e in enumerate(netlist.entities):
@@ -262,8 +262,8 @@ def to_blueprint(netlist: Netlist, label: str = "factorio-llvm") -> dict[str, An
     }
 
 
-def export_string(netlist: Netlist, label: str = "factorio-llvm") -> str:
-    return encode(to_blueprint(netlist, label))
+def export_string(netlist: Netlist, label: str = "factorio-llvm", layout: str = "dense") -> str:
+    return encode(to_blueprint(netlist, label, layout))
 
 
 # --------------------------------------------------------------------------- import

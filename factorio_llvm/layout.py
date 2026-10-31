@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import heapq
 import math
-from collections import deque
+from collections import defaultdict, deque
 
 from .frontend import Unsupported
 from .netlist import GREEN, RED, Color, Connector, Constant, Entity, Gate, Lamp, Net, Panel, Wall, Netlist, Pole, WireSeg
@@ -113,7 +113,8 @@ def place(netlist: Netlist, per_cell: int = SLOTS_PER_CELL) -> list[Pole]:
     its slots); return all substation sites, power ones first."""
     fixed = [e for e in netlist.entities if e.group == FIXED and e.position is not None]
     fixed_poles = [Pole(label=e.label, position=e.position, group="power") for e in fixed if isinstance(e, Pole)]
-    entities = _ordered([e for e in netlist.entities if not isinstance(e, Pole) and not any(e is f for f in fixed)])
+    fixed_ids = {id(e) for e in fixed}
+    entities = _ordered([e for e in netlist.entities if not isinstance(e, Pole) and id(e) not in fixed_ids])
     ncells = max(1, math.ceil(len(entities) / per_cell))
     width = max(1, math.ceil(math.sqrt(ncells)))
     slots = _cell_slots()
@@ -136,6 +137,11 @@ def place(netlist: Netlist, per_cell: int = SLOTS_PER_CELL) -> list[Pole]:
 def _dist(a: Entity, b: Entity) -> float:
     assert a.position is not None and b.position is not None
     return math.dist(a.position, b.position)
+
+
+def _square(e: Entity, size: float) -> tuple[int, int]:
+    assert e.position is not None
+    return (math.floor(e.position[0] / size), math.floor(e.position[1] / size))
 
 
 def _reach(e: Entity) -> float:
@@ -170,9 +176,17 @@ class _Router:
     def __init__(self, poles: list[Pole]) -> None:
         self.poles = poles
         self.owner: dict[tuple[int, Color], Net] = {}  # (pole index, colour) -> net using it
-        self.neighbours = [
-            [j for j, q in enumerate(poles) if j != i and _dist(p, q) <= SUBSTATION_REACH] for i, p in enumerate(poles)
-        ]
+        # Bucket the poles by reach-sized squares, so finding neighbours looks
+        # only at the 3x3 squares around each pole (all pairs is quadratic).
+        r = SUBSTATION_REACH
+        grid: dict[tuple[int, int], list[int]] = defaultdict(list)
+        for i, p in enumerate(poles):
+            grid[_square(p, r)].append(i)
+        self.neighbours = []
+        for i, p in enumerate(poles):
+            gx, gy = _square(p, r)
+            near = [j for dx in (-1, 0, 1) for dy in (-1, 0, 1) for j in grid.get((gx + dx, gy + dy), ())]
+            self.neighbours.append(sorted(j for j in near if j != i and _dist(p, poles[j]) <= r))
         self.wires: list[WireSeg] = []
 
     def _free(self, i: int, net: Net) -> bool:
@@ -228,12 +242,21 @@ class _Router:
                 self._relay(a, b, net)
 
 
-def physical(netlist: Netlist) -> Netlist:
-    """A placed and routed copy: same entities, plus substations, with wires only."""
+LAYOUTS = ("dense", "sparse")
+
+
+def physical(netlist: Netlist, layout: str = "dense") -> Netlist:
+    """A placed and routed copy: same entities, plus substations, with wires only.
+
+    ``dense`` packs a cell full and spreads thinner each time routing runs
+    out of substation channels; ``sparse`` goes straight to one entity per
+    cell, which always routes in one try but takes about 50 times the area."""
+    if layout not in LAYOUTS:
+        raise ValueError(f"layout must be one of {LAYOUTS}")
     # A denser layout needs fewer substations but may run out of channels;
     # on failure, spread the entities thinner and retry. At one entity per
     # cell every cell has 7 relay sites to itself, so this ends.
-    per_cell = SLOTS_PER_CELL
+    per_cell = SLOTS_PER_CELL if layout == "dense" else 1
     while True:
         poles = place(netlist, per_cell)
         router = _Router(poles)

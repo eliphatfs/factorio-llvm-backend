@@ -236,6 +236,64 @@ class Memory:
         return x0 + w + 2
 
 
+    def _beside_screen(self, bank: _Bank, chunks: list[list], width: int | None, x0: int) -> None:
+        """Place each screen chunk's storage in a strip beside the screen, level
+        with the chunk's lamps: right of the screen next to the row where the
+        chunk starts, or left of it next to the row where it ends. Then a
+        chunk's loop is a short local net instead of one more wire that has to
+        leave the screen through the ring of substations (each carries one
+        net per colour, so big screens ran out of them). One chunk per two
+        tile rows and side; if they do not fit, the chunks stay with the
+        rest of the circuit."""
+        a = bank.array
+        w = width or max(1, round(a.size**0.5))
+        rows = -(-a.size // w)
+        top = -rows - 2
+        n = max(len(c) for c in chunks)
+        slots = rows // 2  # row pairs top + 2j, top + 2j + 1 on each side
+        if len(chunks) > 2 * slots or w > CHUNK:  # each chunk must reach a side
+            return
+        sides = {"right": (x0 + w + 2, 1), "left": (x0 - 3, -1)}  # first strip column, direction
+        # Substations: columns every 18 from the screen's ring (which powers
+        # the first 8 strip columns), rows every 18 over the screen's height.
+        pole_xs = {name: [start + d * 8 + (0 if d > 0 else -1) + d * 18 * i for i in range(n // 14 + 2)] for name, (start, d) in sides.items()}
+        pole_ys = list(range(top + 7, top + rows + 9, 18))
+        poles = {name: {(x, y) for x in xs for y in pole_ys} for name, xs in pole_xs.items()}
+
+        def blocked(name: str, col: int, y: int) -> bool:
+            return any(px <= col <= px + 1 and (py <= y + 1 and y <= py + 1) for px, py in poles[name])
+
+        free = {(name, j) for name in sides for j in range(slots)}
+        plan = []
+        for k, members in enumerate(chunks):
+            base = k * CHUNK
+            first_row, last_row = base // w, min(a.size - 1, base + CHUNK - 1) // w
+            want = {"right": top + first_row, "left": top + last_row}
+            best = min(free, key=lambda s: (abs(top + 2 * s[1] + 0.5 - want[s[0]]), s[0]), default=None)
+            if best is None or abs(top + 2 * best[1] + 0.5 - want[best[0]]) > 6:
+                return
+            free.discard(best)
+            plan.append((best, members))
+        used = set()
+        for (name, j), members in plan:
+            start, d = sides[name]
+            y = top + 2 * j
+            # The cell (on the loop) first, nearest the lamps, then the rest in
+            # the order built (key, then each port's masks, delay and writer),
+            # so every net of the chunk runs between near neighbours.
+            order = sorted(members, key=lambda e: 0 if e.label.endswith("..]") else 1)
+            col = start
+            for e in order:
+                while blocked(name, col, y):
+                    col += d
+                e.position = (col + 0.5, y + (0.5 if isinstance(e, Constant) else 1.0))
+                e.group = "screen"
+                col += d
+            used.add(name)
+        for name in used:
+            for x, y in poles[name]:
+                self.b.nl.add(Pole(label="substation", position=(x + 1.0, y + 1.0), group="screen"))
+
     def build(self, inputs: Net | None, outputs: Net, screen_width: int | None = None) -> None:
         """Place every chunk and its readers."""
         screen_x = 0
@@ -248,15 +306,19 @@ class Memory:
             a = bank.array
             group = f"array {a.name}"
             sigs = bank.io if a.external else _CHUNK_SIGNALS
+            chunks: list[list] = []
             for base in range(0, a.size, CHUNK):
                 words = list(zip(sigs, a.init[base : base + CHUNK]))
                 loop = self.b.nl.net(GREEN, f"{a.name}[{base}..]")
                 bank.loops.append(loop)
                 source = joystick if bank.is_joystick else self.clock if bank.is_clock else inputs
+                first = len(self.b.nl.entities)
                 self._chunk(bank, base, words, loop, source, outputs, group)
+                chunks.append(self.b.nl.entities[first:])
                 if bank.is_screen:
                     next_x = self._screen(bank, loop, screen_width, screen_x, base)
             if bank.is_screen:
+                self._beside_screen(bank, chunks, screen_width, screen_x)
                 screen_x = next_x
             # Readers port by port, each with its own copy of the chunk's key,
             # so a port's nets stay short and only the chunk loops reach across.
@@ -405,7 +467,7 @@ JOYSTICK_EXIT = "signal-X"
 CLOCK = "signal-T"  # extern volatile int factorio_clock[1] (see include/factorio.h)
 JOYSTICK_REACH = 7  # tiles from the player to the N/E/S/W sensor gates (from an in-game test)
 JOYSTICK_DIAGONAL_REACH = 5  # tiles along each axis to the diagonal ones (7 was too far)
-JOYSTICK_CENTRE = (-JOYSTICK_REACH - 4, -JOYSTICK_REACH - 4)  # the player's tile, left of and above the screen  # two rows of substations power at most this many
+JOYSTICK_CENTRE = (-JOYSTICK_REACH - 4, JOYSTICK_REACH + 4)  # the player's tile: left of the circuit, below the screen (the screen's side strips need the space beside it)  # two rows of substations power at most this many
 
 
 # Default I/O signals: digits, then letters, then the rest.

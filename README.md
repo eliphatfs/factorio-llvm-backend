@@ -52,21 +52,6 @@ python -c "import llvmlite.binding as l; print(l.llvm_version_info)"
 On Linux, `apt install clang`; on macOS, the Xcode clang works (Apple clang
 15+); on Windows, install LLVM from llvm.org and put `clang` on `PATH`.
 
-A joystick read can see the cage change in the middle of a block, and values
-computed from it in that block can then mix old and new state (in the
-simulator, a move from S straight to N could put the position at 0). Until reads
-are latched, copy `joystick[]` into a `volatile` array first and compute from
-the copy, as `examples/factory.c` does.
-
-`examples/factory.c` is a small factory game on a 256x192 screen (32x24 tiles):
-a chest of plates, an inserter, belts and an engineer you walk with the
-joystick, placing belts and inserters from a toolbar. It is about 6,200
-combinators plus the lamps. Drawing a tile costs about 70 ticks, so the first
-full screen takes about 54,000 ticks (15 minutes) and a frame then takes about
-500 to 900 ticks, depending on how many tiles change. Build it with
-`python -m factorio_llvm examples/factory.c -f game --args 1000000000 --no-sim`
-(`--no-sim` bakes the arguments in without simulating).
-
 ## Usage
 
 ```
@@ -89,6 +74,8 @@ can paste it straight into the game.
 | `--unroll N` | unroll every loop N times (default: only `#pragma unroll` loops) |
 | `--schedule` | print the step schedule of a function with control flow |
 | `--emit-llvm` | print the LLVM IR clang produced and stop |
+| `--no-sim` | bake `--args` into the blueprint without simulating (for programs that run a long time) |
+| `--layout dense\|sparse` | `dense` (default) packs tightly and spreads out if routing fails; `sparse` places one combinator per cell and routes in one try, at about 50 times the area |
 | `--no-blueprint` | do not print the blueprint string |
 | `--no-copy` | do not copy the blueprint to the clipboard |
 
@@ -126,11 +113,14 @@ Start with `#include <factorio.h>` (found automatically). It declares:
   colour (`RGB()` and colour names are provided). Any size works; large
   screens get substations inside to power them.
 - **Joystick.** `joystick[8]` (`JOY_N` .. `JOY_NW`, or `joy_dx()` /
-  `joy_dy()`) reads an 8-direction joystick built above and left of the
-  screen: a small cage with sensor gates around it. Switch on the tagged
+  `joy_dy()`) reads an 8-direction joystick built below the screen, left of
+  the circuit: a small cage with sensor gates around it. Switch on the tagged
   constant combinator to open the cage door, stand on the middle tile, switch
   it off, then hold WASD; leaning towards a gate trips its sensor. See
   `examples/joystick.c`. The joystick layout has not yet been tested in game.
+  If the joystick changes while a block is computing from it, the result can
+  mix old and new state; copy `joystick[]` into a `volatile` array first and
+  compute from the copy, as `examples/factory.c` does.
 - **`ticks()`**, a free-running game-tick counter.
 
 ### Examples
@@ -141,7 +131,16 @@ python -m factorio_llvm examples/m2.c -f gcd --args 84 36
 python -m factorio_llvm examples/m4.c -f draw --args 3
 python -m factorio_llvm examples/joystick.c
 python -m factorio_llvm examples/allsignals.c   # one lamp per signal, to check signals in game
+python -m factorio_llvm examples/factory.c -f game --args 1000000000 --no-sim
 ```
+
+`examples/factory.c` is a small factory game on a 256x192 screen (32x24
+tiles): a chest of plates, an inserter, belts, and an engineer you walk with
+the joystick, placing belts and inserters from a toolbar on the bottom row.
+It is about 6,200 combinators plus the lamps and exports in about 1.5
+minutes. Drawing a tile costs about 70 ticks, so the first full screen takes
+about 54,000 ticks (15 minutes) and a frame then takes about 500 to 900
+ticks.
 
 ## Credits
 
