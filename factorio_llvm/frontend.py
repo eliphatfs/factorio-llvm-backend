@@ -508,6 +508,15 @@ def compile_c(source: str | Path, *, opt: str = "-O2", unroll: int = 1) -> str:
 
 
 def screen_width_of(ir_text: str) -> int | None:
-    """The ``screen_width`` constant factorio.h defines from SCREEN_W, if any."""
-    m = re.search(r"^@screen_width = [^\n]*constant i32 (-?\d+)", ir_text, re.M)
-    return int(m.group(1)) if m else None
+    """The ``screen_width`` constant factorio.h defines from SCREEN_W, if any.
+
+    Read through llvmlite like every other global: LLVM parses and verifies
+    the module, and we read the global's initializer as an array of one word."""
+    module = llvm.parse_assembly(ir_text)
+    for g in module.global_variables:
+        if g.name == "screen_width":
+            arr = _global_array(str(g).strip())
+            if arr is None or not arr.readonly or arr.size != 1:
+                raise Unsupported(f"screen_width must be a constant int: {str(g).strip()}")
+            return arr.init[0]
+    return None
