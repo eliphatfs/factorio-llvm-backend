@@ -204,7 +204,7 @@ class Memory:
         screen_x = 0
         joystick = None
         if any(b.is_joystick for b in self.banks.values()):
-            joystick = self._joystick()
+            joystick = self.joystick = self._joystick()
         for bank in self.banks.values():
             a = bank.array
             group = f"array {a.name}"

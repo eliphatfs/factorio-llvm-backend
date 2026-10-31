@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .frontend import Array, Block, Function, Op, Operand, Unsupported, Value
+from .frontend import _array_of, Array, Block, Function, Op, Operand, Unsupported, Value
 from .lower import GATE, PRIVATE_CONSTANT, Lowered, Wire, _Builder, _colors, _depth, _Lowerer, _operand
 from .signals import EACH, rich_text
 from .netlist import GREEN, RED, Arithmetic, Cond, Connector, Constant, Decider, Message, Net, Netlist, Out, Panel, Sig
@@ -91,6 +91,8 @@ class _CfgLowerer(_Lowerer):
         self.writes = self.b.nl.net(GREEN, "register writes")
         self.registers: list[Register] = []
         self.mem = Memory(self.b, self.step, fn.arrays) if fn.arrays else None
+        self.written = {a.name for b in fn.blocks for o in b.ops if o.opcode in ("store", "clear") for a in [_array_of(o)] if a}
+        self.direct_reads: list[tuple[Arithmetic, Array, int]] = []
         self.loads: list[Load] = []  # the current block's, while lowering it
         self.stores: list[Store] = []
         self.gates: set[tuple[int, int]] = set()  # (block net, step) with a GATE flag
@@ -117,6 +119,15 @@ class _CfgLowerer(_Lowerer):
         if op.opcode == "load":
             assert self.mem is not None
             ptr = self.get(op.args[0])
+            if isinstance(ptr.index, int) and ptr.array.external and ptr.array.name not in self.written:
+                # An input word at a known index: read it straight off the
+                # INPUT (or joystick) wire, no read port. Its signal is picked
+                # later, so the copy is filled in by _wire_direct_reads.
+                out = self.b.local_signal()
+                copy = Arithmetic(Sig(EACH, frozenset({RED})), "+", 0, out, label=f"{op.text} (direct)")
+                self.b.place(copy, (), GREEN)
+                self.direct_reads.append((copy, ptr.array, ptr.index))
+                return Wire(out, 1)
             port = sum(1 for x in self.loads if x.array == ptr.array.name)
             self.loads.append(Load(ptr.array.name, port, ptr.index, _name(op.args[0])))
             return self.mem.load_result(ptr.array, port, ptr.index, op.text)
@@ -384,6 +395,10 @@ class _CfgLowerer(_Lowerer):
             if outs:
                 out_terminal.label += "\n" + _io_lines(outs)
             self.mem.build(inputs, output, self.screen_width)
+            for copy, arr, i in self.direct_reads:
+                bank = self.mem.bank(arr)
+                copy.left = Sig(bank.io[i], frozenset({RED}))
+                (self.mem.joystick if bank.is_joystick else inputs).attach(copy.inp)
         unknown = set(self.io_choice) - set(io)
         if unknown:
             raise Unsupported(f"--io names no extern array: {sorted(unknown)}")
