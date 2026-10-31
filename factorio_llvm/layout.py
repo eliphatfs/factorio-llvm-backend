@@ -35,7 +35,7 @@ COMBINATOR_REACH = 9.0
 SUBSTATION_REACH = 18.0
 _SUB_LO = CELL // 2 - 1
 # Top-left tiles of the 2x2 substation sites in a cell; the first one powers it.
-SITES = ((_SUB_LO, _SUB_LO), (2, 4), (8, 6), (4, 0), (6, 10))
+SITES = ((_SUB_LO, _SUB_LO), (2, 4), (8, 6), (4, 0), (6, 10), (0, 8), (10, 2))
 
 
 def _cell_slots() -> list[tuple[int, int]]:
@@ -90,11 +90,12 @@ def _fixed_poles(fixed: list[Entity]) -> list[Pole]:
     return poles
 
 
-def place(netlist: Netlist) -> list[Pole]:
-    """Give every entity a position; return all substation sites, power ones first."""
+def place(netlist: Netlist, per_cell: int = SLOTS_PER_CELL) -> list[Pole]:
+    """Give every entity a position, at most ``per_cell`` to a cell (spread over
+    its slots); return all substation sites, power ones first."""
     fixed = [e for e in netlist.entities if e.group == FIXED and e.position is not None]
     entities = _ordered([e for e in netlist.entities if not isinstance(e, Pole) and not any(e is f for f in fixed)])
-    ncells = max(1, math.ceil(len(entities) / SLOTS_PER_CELL))
+    ncells = max(1, math.ceil(len(entities) / per_cell))
     width = max(1, math.ceil(math.sqrt(ncells)))
     slots = _cell_slots()
     poles = []
@@ -103,9 +104,9 @@ def place(netlist: Netlist) -> list[Pole]:
             ox, oy = _cell_origin(i, width)
             poles.append(Pole(label="substation", position=(ox + sx + 1.0, oy + sy + 1.0), group="power" if k == 0 else "relay"))
     for n, e in enumerate(entities):
-        cell, slot = divmod(n, SLOTS_PER_CELL)
+        cell, k = divmod(n, per_cell)
         ox, oy = _cell_origin(cell, width)
-        col, rp = slots[slot]
+        col, rp = slots[k * SLOTS_PER_CELL // per_cell]
         if isinstance(e, (Constant, Lamp, Panel)):
             e.position = (ox + col + 0.5, oy + 2 * rp + 0.5)
         else:
@@ -200,16 +201,27 @@ class _Router:
 
 def physical(netlist: Netlist) -> Netlist:
     """A placed and routed copy: same entities, plus substations, with wires only."""
-    poles = place(netlist)
+    # A denser layout needs fewer substations but may run out of channels;
+    # on failure, spread the entities thinner and retry. At one entity per
+    # cell every cell has 7 relay sites to itself, so this ends.
+    per_cell = SLOTS_PER_CELL
+    while True:
+        poles = place(netlist, per_cell)
+        router = _Router(poles)
+        try:
+            # Big nets first: they are dense and rarely need substations; small
+            # sparse nets then take the substation channels they need.
+            for net in sorted(netlist.logical, key=lambda n: -len(n.members)):
+                router.route(net)
+            break
+        except Unsupported:
+            if per_cell == 1:
+                raise
+            per_cell = max(1, per_cell * 2 // 3)
     out = Netlist()
     for e in _ordered(netlist.entities):
         out.add(e)
     out.wires = list(netlist.wires)
-    router = _Router(poles)
-    # Big nets first: they are dense and rarely need substations; small sparse
-    # nets then take the substation channels they need.
-    for net in sorted(netlist.logical, key=lambda n: -len(n.members)):
-        router.route(net)
     used = {i for i, _ in router.owner}
     for i, p in enumerate(poles):
         if p.group == "power" or i in used:

@@ -57,3 +57,12 @@ def test_big_array_is_chunked(build):
     c = lower(read_function(ir, "chunks"))
     names = [n.name for n in c.netlist.logical]
     assert {"big[0..]", "big[395..]", "big[790..]"} <= set(names)
+
+
+@pytest.mark.parametrize("name,arg,want", [("squares", 5, 85664), ("scatter", 3, 992), ("chunks", 2, 12142)])
+def test_clang20_ir(name, arg, want):
+    # IR from clang 20 (samesign compares, byte-offset constant geps).
+    ir = (Path(__file__).parent / "data" / "m5_clang20.ll").read_text()
+    c = lower(read_function(ir, name))
+    assert c.run(arg) == want
+    assert check_reach(import_string(export_string(c.netlist))) == []
