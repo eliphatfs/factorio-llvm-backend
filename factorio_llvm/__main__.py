@@ -35,6 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--unroll", type=int, default=1, help="unroll every loop N times (default: only #pragma unroll loops)")
     p.add_argument("--emit-llvm", action="store_true", help="print the LLVM IR clang produced and stop")
     p.add_argument("--no-blueprint", action="store_true", help="do not print the blueprint string")
+    p.add_argument("--no-copy", action="store_true", help="do not copy the blueprint string to the clipboard")
     ns = p.parse_args(argv)
 
     try:
@@ -88,8 +89,41 @@ def main(argv: list[str] | None = None) -> int:
     if stepped:
         compiled.reset.enabled = True  # place it held in reset; switch off to run
     if not ns.no_blueprint:
-        print(export_string(compiled.netlist, f"@{compiled.function}"))
+        bp = export_string(compiled.netlist, f"@{compiled.function}")
+        print(bp)
+        if not ns.no_copy and sys.stdout.isatty():
+            tool = copy_to_clipboard(bp)
+            if tool:
+                print(f"  blueprint copied to clipboard ({tool})", file=sys.stderr)
     return 0
+
+
+_CLIPBOARD_TOOLS = (
+    ["pbcopy"],
+    ["clip.exe"],
+    ["wl-copy"],
+    ["xclip", "-selection", "clipboard"],
+    ["xsel", "--clipboard", "--input"],
+)
+
+
+def copy_to_clipboard(text: str) -> str | None:
+    """Best-effort copy to the system clipboard; returns the tool used, or None."""
+    try:
+        import pyperclip  # type: ignore
+
+        pyperclip.copy(text)
+        return "pyperclip"
+    except Exception:
+        pass
+    for cmd in _CLIPBOARD_TOOLS:
+        try:
+            subprocess.run(cmd, input=text.encode(), check=True, timeout=5,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return cmd[0]
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return None
 
 
 def _reads_only(compiled, name: str) -> bool:
