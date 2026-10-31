@@ -114,6 +114,8 @@ class Store:
     clear: bool = False
     sources: tuple[str, str] = ("", "")
     port: int = 0  # bus write port
+    wave: int = 0  # steps after the block's first stores (see split_after_stores)
+    enable: Lowered | None = None  # E to send when guarded: array id (or -id) if the guard holds, else 0
 
 
     def __str__(self) -> str:

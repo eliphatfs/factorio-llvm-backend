@@ -59,6 +59,6 @@ def test_fused_values_match_c(args):
 
 
 def test_branch_condition_folds_into_the_jump():
-    c = lower(read_function(compile_c("int f(int n) { int s = 0; while (n > 1 && n != 7) { n--; s++; } return s; }"), "f"))
-    assert c.run(10) == 3 and c.run(5) == 4
+    c = lower(read_function(compile_c("int f(int n) { while (n > 1 && n != 7) n = n & 1 ? 3 * n + 1 : n / 2; return n; }"), "f"))
+    assert c.run(10) == 1 and c.run(14) == 7
     assert any(j.when is not None for b in c.schedule.blocks for j in b.jumps)

@@ -21,15 +21,17 @@ arrays use their I/O signals, so they are one chunk. Each chunk has:
 A read-only array (a constant global) is a ROM: one constant combinator per
 chunk with the non-zero words, as its loop.
 
-Write. A store pulses the bus at its block's gate step: address + 1 as ``A``
-(two pulses, the address and a 1), value as ``V``, array id as ``E``. The
-``k``-th store of a block uses write port ``k``: port 0 is ``A``/``V``/``E``,
-later ports get bus signals of their own, and each chunk the port writes has
-its own mask, delayed value and writer (with several ports, a second copy of
-each mask feeds the cell). The word is on the loop three ticks later, before
-the next block can read it. ``frontend.split_after_stores`` ends a block
-before a load of an array it wrote, and before a store that may hit a word it
-wrote: two stores share a block only if their addresses differ by a constant.
+Write. A store pulses the bus for one step: address + 1 as ``A`` (two
+pulses, the address and a 1), value as ``V``, array id as ``E`` (0 for a
+guarded store whose guard fails: nothing is written). A block's stores go out
+in *waves* ending at its gate step, one step apart; a store that may hit a
+word an earlier one wrote is in a later wave (``frontend.split_after_stores``),
+and stores one step apart to one word leave the later value. The ``k``-th
+store of a wave uses write port ``k``: port 0 is ``A``/``V``/``E``, later ports
+get bus signals of their own, and each chunk the port writes has its own mask,
+delayed value and writer (with several ports, a second copy of each mask
+feeds the cell). The word is on the loop three ticks after its wave, before
+the next block can read it; a block ends before a load of an array it wrote.
 
 Read port. Port ``j`` of an array has an address net (red for even ports,
 green for odd ones) (``A`` = address + 1) and

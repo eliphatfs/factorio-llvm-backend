@@ -99,6 +99,7 @@ class _Builder:
         self.group = ""
         self._free = list(reversed(allocatable_signals()))
         self._local_free: list[str] = []
+        self.pools: dict[int, list[str]] = {}
 
     def signal(self) -> str:
         """A fresh signal on the global bus."""
@@ -122,6 +123,7 @@ class _Builder:
     def begin_block(self, name: str) -> Net:
         self.local = self.nl.net(GREEN, f"block {name}")
         self._local_free = [s for s in reversed(allocatable_signals()) if s != GATE]
+        self.pools[id(self.local)] = self._local_free  # shared: a block's signals stay unique
         self.group = name
         return self.local
 

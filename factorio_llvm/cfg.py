@@ -27,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .frontend import _array_of, Array, Block, Function, Op, Operand, Unsupported, Value
-from .fuse import Bool
+from .fuse import Bool, pieces
 from .lower import GATE, PRIVATE_CONSTANT, Lowered, Wire, _Builder, _colors, _depth, _Lowerer, _operand
 from .signals import EACH, rich_text
 from .netlist import GREEN, RED, Arithmetic, Cond, Connector, Constant, Decider, Message, Net, Netlist, Out, Panel, Sig
@@ -96,10 +96,15 @@ class _CfgLowerer(_Lowerer):
         self.direct_reads: list[tuple[Arithmetic, Array, int]] = []
         self.loads: list[Load] = []  # the current block's, while lowering it
         self.stores: list[Store] = []
-        self.gates: set[tuple[int, int]] = set()  # (block net, step) with a GATE flag
+        self.copies: dict[int, tuple[Register, str]] = {}  # phi -> (copy register, phi's block)
+        self.cur = ""  # the block being lowered
+        self.gates: dict[tuple[int, int], str] = {}  # (block net, step) -> its flag signal
 
     # values: block-local combinators first, then registers and arguments
     def get_raw(self, a: Operand):
+        if not isinstance(a, int) and id(a) in self.copies and self.copies[id(a)][1] != self.cur:
+            w = Wire(self.copies[id(a)][0].signal, 0, RED)
+            return Ptr(a.array, w) if a.array is not None else w
         if isinstance(a, int):
             return a
         if isinstance(a, Array):
@@ -139,21 +144,30 @@ class _CfgLowerer(_Lowerer):
                 raise Unsupported(f"storing a pointer: {op.text}")
             if ptr.array.readonly:
                 raise Unsupported(f"store to a constant: {op.text}")
-            port = len(self.stores)
+            port = sum(1 for s in self.stores if s.wave == op.wave)
             self.mem.write_port(ptr.array, port)
             names = (_name(op.args[1]), _name(op.args[0]))
-            st = Store(0, ptr.array.name, self.mem.bank(ptr.array).id, ptr.index, value, sources=names, port=port)
+            aid = self.mem.bank(ptr.array).id
+            st = Store(0, ptr.array.name, aid, ptr.index, value, sources=names, port=port, wave=op.wave, enable=self._enable(op, aid))
             self.stores.append(st)
             return 0
         if op.opcode == "clear":
             assert self.mem is not None
             arr = op.args[0]
             assert isinstance(arr, Array)
-            port = len(self.stores)
+            port = sum(1 for s in self.stores if s.wave == op.wave)
             self.mem.write_port(arr, port)
-            self.stores.append(Store(0, arr.name, self.mem.bank(arr).id, clear=True, port=port))
+            aid = self.mem.bank(arr).id
+            self.stores.append(Store(0, arr.name, aid, clear=True, port=port, wave=op.wave, enable=self._enable(op, -aid)))
             return 0
         return super().op(op)
+
+    def _enable(self, op: Op, e: int):
+        """A guarded store's E: ``e`` while its guard holds, else 0 (no write)."""
+        if op.guard is None:
+            return None
+        g = self._boolish(self.get_raw(op.guard))
+        return self.real(pieces([(g, e)]))
 
     def set(self, v: Value, x) -> None:
         self.local[id(v)] = x
@@ -180,13 +194,21 @@ class _CfgLowerer(_Lowerer):
             for op in b.ops:
                 self.def_block[id(op.result)] = b.name
 
+        phi_block = {id(p.result): b.name for b in self.fn.blocks for p in b.phis}
+
         def need(v: Operand, used_in: str) -> None:
             if isinstance(v, Value) and self.def_block.get(id(v), used_in) != used_in:
                 self._register(v)
+            # A phi's register takes its next value at the end of every
+            # predecessor, whichever way that one branches; uses outside the
+            # phi's block read a copy the block keeps instead.
+            if isinstance(v, Value) and phi_block.get(id(v), used_in) != used_in and id(v) not in self.copies:
+                r = self._new_register(f"%{v.name} (as last seen)")
+                self.copies[id(v)] = (r, phi_block[id(v)])
 
         for b in self.fn.blocks:
             for op in b.ops:
-                for a in op.args:
+                for a in [*op.args, op.guard]:
                     need(a, b.name)
             t = b.term
             assert t is not None
@@ -236,15 +258,18 @@ class _CfgLowerer(_Lowerer):
     def _gated(self, step: int, v: Lowered, signal: str, net: Net, label: str) -> None:
         """Put ``v`` on ``net`` as ``signal`` for the one tick after S = ``step``.
 
-        A decider in the block raises GATE = 1 on the local net while S = step - 1,
-        so at S = step one arithmetic ``v * GATE`` both samples and renames.
+        A decider in the block raises a flag = 1 on the local net while S = step - 1,
+        so at S = step one arithmetic ``v * flag`` both samples and renames. The
+        block's first flag is GATE; stores of earlier waves get flags of their own.
         """
         key = (id(self.b.local), step)
         if key not in self.gates:
-            flag = Decider([self._step_is(step - 1)], [Out(GATE, copy=False, constant=1)], label=f"gate at {step}")
+            mine = [s for (net, _), s in self.gates.items() if net == key[0]]
+            sig = GATE if not mine else self.b.local_signal()
+            flag = Decider([self._step_is(step - 1)], [Out(sig, copy=False, constant=1)], label=f"gate at {step}")
             self.b.place(flag, (RED,), GREEN)
-            self.gates.add(key)
-        g = Sig(GATE, frozenset({GREEN}))
+            self.gates[key] = sig
+        g = Sig(self.gates[key], frozenset({GREEN}))
         pick = Arithmetic(g, "*", _operand(v), signal, label=label)
         self.b.place(pick, _colors(v) | {GREEN}, net)
 
@@ -255,11 +280,14 @@ class _CfgLowerer(_Lowerer):
         assert self.mem is not None
         sig_a, sig_v, sig_e = self.mem.write_signals[st.port]
         if st.clear:
-            self._gated(st.step, -st.array_id, sig_e, self.b.bus, f"clear {st.array}")
+            e = st.enable if st.enable is not None else -st.array_id
+            if e != 0:
+                self._gated(st.step, e, sig_e, self.b.bus, f"clear {st.array}")
             return
         label = f"store {st.array} at {st.step}"
+        e = st.enable if st.enable is not None else st.array_id
         # The address goes out as address + 1 (see memory.py): a second pulse adds the 1.
-        for v, sig in ((st.address, sig_a), (1, sig_a), (st.value, sig_v), (st.array_id, sig_e)):
+        for v, sig in ((st.address, sig_a), (1, sig_a), (st.value, sig_v), (e, sig_e)):
             if v != 0:
                 self._gated(st.step, v, sig, self.b.bus, f"{label} ({sig})")
 
@@ -321,6 +349,7 @@ class _CfgLowerer(_Lowerer):
         k = FIRST_STEP
         for b in self.fn.blocks:
             nets[b.name] = self.b.begin_block(b.name)
+            self.cur = b.name
             self.local, self.loads, self.stores = {}, [], []
             for op in b.ops:
                 self.set(op.result, self.op(op))
@@ -328,8 +357,9 @@ class _CfgLowerer(_Lowerer):
             # Depth >= 1: the GATE flag is raised at gate - 1, which S passes only
             # when that is inside the block (a jump lands S on the base).
             bs = BlockSchedule(b.name, k, max(1, self._block_depth(b)), loads=self.loads, stores=self.stores)
+            last = max((st.wave for st in bs.stores), default=0)
             for st in bs.stores:
-                st.step = bs.gate
+                st.step = bs.gate - (last - st.wave)
             sched.append(bs)
             k = bs.jump + 1
         schedule = Schedule(sched, self.registers, result, halt=k)
@@ -337,6 +367,10 @@ class _CfgLowerer(_Lowerer):
         # Pass 2: the schedule's writes and jumps.
         for b, bs in zip(self.fn.blocks, sched):
             self.local = lowered[b.name]
+            self.cur = b.name
+            for p in b.phis:
+                if id(p.result) in self.copies:
+                    self._keep(bs, self.copies[id(p.result)][0], p.result, f"copy %{p.result.name}")
             for op in b.ops:
                 if id(op.result) in self.regs:
                     self._keep(bs, self.regs[id(op.result)], op.result, f"keep %{op.result.name}")
@@ -352,6 +386,7 @@ class _CfgLowerer(_Lowerer):
         # Emit: each block's gates and jumps next to its combinators, then registers.
         for bs in sched:
             self.b.local, self.b.group = nets[bs.name], bs.name
+            self.b._local_free = self.b.pools[id(self.b.local)]
             for w in bs.writes:
                 self._emit_write(w)
             for st in bs.stores:
@@ -446,9 +481,14 @@ class _CfgLowerer(_Lowerer):
         for succ in t.targets + [d for _, d in t.cases]:
             for p in self._block(succ).phis:
                 needed += [self.get(v) for pred, v in p.incoming if pred == b.name]
+        last = max((st.wave for st in self.stores), default=0)
+        depth = _depth(*(x.index if isinstance(x, Ptr) else x for x in needed))
         for st in self.stores:
-            needed += [st.address, st.value]
-        return _depth(*(x.index if isinstance(x, Ptr) else x for x in needed))
+            # Earlier waves go out (last - wave) steps before the gate, after
+            # the GATE flag step (so at least one step into the block).
+            ready = _depth(*(x for x in (st.address, st.value, st.enable) if x is not None))
+            depth = max(depth, ready + last - st.wave, last - st.wave + 1)
+        return depth
 
     def _folded_branch(self, b: Block):
         """A conditional branch's condition, to test right in the jump decider
