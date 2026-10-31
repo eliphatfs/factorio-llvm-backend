@@ -31,10 +31,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--screen-width", type=int, help="lamps per row for extern screen* arrays (default: square)")
     p.add_argument("--schedule", action="store_true", help="print the step schedule of a function with control flow")
+    p.add_argument("--emit-llvm", action="store_true", help="print the LLVM IR clang produced and stop")
     p.add_argument("--no-blueprint", action="store_true", help="do not print the blueprint string")
     ns = p.parse_args(argv)
 
     ir = compile_c(ns.source) if ns.source.suffix == ".c" else ns.source.read_text()
+    if ns.emit_llvm:
+        print(ir)
+        return 0
     try:
         io = {}
         for spec in ns.io:

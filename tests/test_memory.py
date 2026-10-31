@@ -146,3 +146,17 @@ entry:
 }
 """
     assert lower(read_function(ir, "f")).run(7) == 7
+
+
+def test_samesign_icmp():
+    # Newer clang marks compares of same-sign values with samesign.
+    ir = """
+define dso_local i32 @f(i32 %n) {
+entry:
+  %c = icmp samesign ult i32 %n, 979
+  %r = zext i1 %c to i32
+  ret i32 %r
+}
+"""
+    c = lower(read_function(ir, "f"))
+    assert c.run(5) == 1 and c.run(1000) == 0
