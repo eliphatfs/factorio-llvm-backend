@@ -27,9 +27,9 @@ def test_cage_has_eight_gates_and_walls(ir):
     walls = [e for e in c.netlist.entities if isinstance(e, Wall) and e.sensor]
     gates = [e for e in c.netlist.entities if isinstance(e, Gate) and e.label.endswith(" gate")]
     assert sorted(w.sensor for w in walls) == sorted(JOYSTICK) and len(gates) == 8
-    # A closed ring of 7 walls and a door round the player.
+    # Five walls and a door round the player.
     ring = [e for e in c.netlist.entities if isinstance(e, (Wall, Gate)) and not (e in walls or e in gates)]
-    assert len(ring) == 8 and len({e.position for e in ring}) == 8
+    assert len(ring) == 6 and len({e.position for e in ring}) == 6
     # Every sensor gate's wall is next to it, in line with it.
     for g, w in zip(gates, walls):
         dx, dy = w.position[0] - g.position[0], w.position[1] - g.position[1]

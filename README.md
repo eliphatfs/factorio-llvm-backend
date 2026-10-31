@@ -78,8 +78,8 @@ most 16 rows).
 docs and helpers: define `SCREEN_W`/`SCREEN_H` first for `screen[]` (its width
 also sets the lamp layout), plus `RGB()` and colour names. `joystick[8]` is an
 8-direction joystick (`JOY_N` .. `JOY_NW`, or `joy_dx()`/`joy_dy()`): a cage
-of a closed walled cell, above and left of the screen, with 8 shut sensor gates 7 tiles
-around it. Switch on the tagged constant to open the cell's door, stand on the
+of a 3x2 cage (five walls and a door gate below), above and left of the screen, with 8 shut sensor gates 7 tiles
+around it. Switch on the tagged constant to open the cage's door, stand on the
 middle tile, switch it off, then hold WASD: leaning towards a gate trips its
 sensor, and its wall reports that arrow signal. See `examples/joystick.c`. Gate orientation and the
 wall's circuit settings follow an in-game experiment but the exported

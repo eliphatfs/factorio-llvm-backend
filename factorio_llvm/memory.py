@@ -227,8 +227,7 @@ class Memory:
     def _joystick(self) -> Net:
         """Place the joystick left of the screen; return the net its walls report on.
 
-        The player stands in a closed 3x3 ring of walls whose bottom middle is a
-        door gate. Eight sensor gates stand JOYSTICK_REACH tiles away, one per
+        The player stands in a 3x2 cage: five walls and a door gate below. Eight sensor gates stand JOYSTICK_REACH tiles away, one per
         direction, held shut. Pushing towards one brings the player a little
         closer to it, so its sensor fires and its wall outputs that direction's
         signal; gates nearer than that would see the player all the time. The
@@ -244,14 +243,12 @@ class Memory:
             e.position = (cx + dx + 0.5, cy + dy + 0.5)
             self.b.place(e, (), net if wired else None, "screen")
 
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                if (dx, dy) == (0, 1):
-                    put(Gate(vertical=False, label="joystick door"), dx, dy)
-                elif (dx, dy) == (1, 1):
-                    put(Wall(Cond(x, ">", 0), label="joystick door control"), dx, dy, wired=True)
-                elif (dx, dy) != (0, 0):
-                    put(Wall(Cond(x, "<", 0), label="joystick cage"), dx, dy)
+        # A wall above and two on each side; the door below. Two tall, so the
+        # player only drifts up and down a little (2x2 is too small to enter).
+        for dx, dy in ((0, -1), (-1, 0), (1, 0), (-1, 1)):
+            put(Wall(Cond(x, "<", 0), label="joystick cage"), dx, dy)
+        put(Gate(vertical=False, label="joystick door"), 0, 1)
+        put(Wall(Cond(x, ">", 0), label="joystick door control"), 1, 1, wired=True)
         r = JOYSTICK_REACH
         for sig, (sx, sy) in zip(JOYSTICK, _JOYSTICK_STEPS):
             # North and south gates lie east-west with their wall beside them;
