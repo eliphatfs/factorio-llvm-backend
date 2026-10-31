@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .frontend import _array_of, Array, Block, Function, Op, Operand, Unsupported, Value
+from .fuse import Bool
 from .lower import GATE, PRIVATE_CONSTANT, Lowered, Wire, _Builder, _colors, _depth, _Lowerer, _operand
 from .signals import EACH, rich_text
 from .netlist import GREEN, RED, Arithmetic, Cond, Connector, Constant, Decider, Message, Net, Netlist, Out, Panel, Sig
@@ -98,7 +99,7 @@ class _CfgLowerer(_Lowerer):
         self.gates: set[tuple[int, int]] = set()  # (block net, step) with a GATE flag
 
     # values: block-local combinators first, then registers and arguments
-    def get(self, a: Operand):
+    def get_raw(self, a: Operand):
         if isinstance(a, int):
             return a
         if isinstance(a, Array):
@@ -205,8 +206,16 @@ class _CfgLowerer(_Lowerer):
         if j.delta == 0:
             return
         conds = [self._step_is(j.step)] + [Cond(_operand(t.value), t.cmp, t.constant) for t in j.tests]
+        leaves = [t.value for t in j.tests]
+        if j.when is not None:
+            # (S = step and tests) and (c1 or c2 ...) = (S = step and tests and c1) or ...
+            base, conds = conds, []
+            for clause in j.when.clauses:
+                conds += [Cond(c.left, c.cmp, c.right, join="or" if conds and k == 0 else "and") for k, c in enumerate(base)]
+                conds += [Cond(_operand(a.a), a.cmp, _operand(a.b)) for a in clause]
+            leaves += self._leaves(j.when)
         dec = Decider(conds, [Out(self.step, copy=False, constant=j.delta)], label=j.label)
-        self.b.place(dec, _colors(*(t.value for t in j.tests)) | {RED}, RED)
+        self.b.place(dec, _colors(*leaves) | {RED}, RED)
 
     def _pass(self, conds: list[Cond], v: Lowered, signal: str, net: Net, label: str, add: int = 0) -> None:
         """While ``conds`` hold, a gate passes ``v + add``; a rename puts it on ``net`` as ``signal``."""
@@ -429,16 +438,26 @@ class _CfgLowerer(_Lowerer):
         assert t is not None
         for v in (t.cond, t.value):
             if v is not None:
-                needed.append(self.get(v))
+                folded = self._folded_branch(b) if v is t.cond else None
+                needed += self._leaves(folded) if folded else [self.get(v)]
         for op in b.ops:
             if id(op.result) in self.regs:
-                needed.append(self.local[id(op.result)])
+                needed.append(self.get(op.result))
         for succ in t.targets + [d for _, d in t.cases]:
             for p in self._block(succ).phis:
                 needed += [self.get(v) for pred, v in p.incoming if pred == b.name]
         for st in self.stores:
             needed += [st.address, st.value]
         return _depth(*(x.index if isinstance(x, Ptr) else x for x in needed))
+
+    def _folded_branch(self, b: Block):
+        """A conditional branch's condition, to test right in the jump decider
+        instead of placing it as a signal first, or None."""
+        t = b.term
+        if t is None or t.kind != "condbr":
+            return None
+        raw = self.get_raw(t.cond)
+        return raw if isinstance(raw, Bool) and raw.memo is None else None
 
     def _tag(self, terminal: Connector, text: str, icon: str) -> None:
         self.b.tag(terminal, text, icon)
@@ -454,9 +473,11 @@ class _CfgLowerer(_Lowerer):
         nxt = bs.jump + 1
         label = f"{b.name}: {t.text.splitlines()[0]}"
 
-        def go(target: str, tests: list[Test], note: str = "") -> None:
-            delta = (schedule.halt if target == HALT else schedule.block(target).base) - nxt
-            bs.jumps.append(Jump(bs.jump, tests, delta, target, f"{label}{note}"))
+        def offset(target: str) -> int:
+            return (schedule.halt if target == HALT else schedule.block(target).base) - nxt
+
+        def go(target: str, tests: list[Test], note: str = "", when=None, minus: int = 0) -> None:
+            bs.jumps.append(Jump(bs.jump, tests, offset(target) - minus, target, f"{label}{note}", when))
 
         if t.kind == "ret":
             assert t.value is not None
@@ -464,6 +485,11 @@ class _CfgLowerer(_Lowerer):
             go(HALT, [])
         elif t.kind == "br":
             go(t.targets[0], [])
+        elif t.kind == "condbr" and (folded := self._folded_branch(b)):
+            # Always take the false jump; when the condition holds, a second
+            # decider adds the difference, landing on the true target.
+            go(t.targets[1], [], " (false, unless true)")
+            go(t.targets[0], [], " (true: on top of false)", folded, offset(t.targets[1]))
         elif t.kind == "condbr":
             c = self.get(t.cond)
             if isinstance(c, int):

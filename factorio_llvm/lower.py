@@ -13,6 +13,9 @@ from dataclasses import dataclass, field
 from typing import Iterable, TypeVar
 
 from .frontend import Function, Op, Operand, Unsupported, Value
+from .fuse import (
+    Bool, Lin, Pieces, TooBig, atom, band, bnot, bor, cases_of, lin_add, lin_of, lin_scale, pieces, simple, unsigned_atom,
+)
 from .signals import rich_text
 from .netlist import GREEN, RED, Arithmetic, Color, Cond, Connector, Constant, Decider, Entity, Message, Net, Netlist, Out, Panel, Sig
 from .signals import EACH, allocatable_signals
@@ -165,8 +168,202 @@ class _Lowerer:
         self.env: dict[int, Lowered] = {}
         self.names: dict[str, str] = {}
 
-    def get(self, a: Operand) -> Lowered:
+    def get_raw(self, a: Operand):
+        """``a`` as lowered so far: possibly a lazy form (see fuse.py)."""
         return a if isinstance(a, int) else self.env[id(a)]
+
+    def get(self, a: Operand) -> Lowered:
+        """``a`` as a signal (or constant), placing its lazy form if need be."""
+        return self.real(self.get_raw(a))
+
+    # ---- lazy forms (fuse.py)
+
+    def real(self, x):
+        if isinstance(x, bool):
+            return int(x)
+        if not isinstance(x, (Lin, Bool, Pieces)):
+            return x
+        if x.memo is None:
+            x.memo = self._place_lin(x) if isinstance(x, Lin) else self._place_bool(x) if isinstance(x, Bool) else self._place_pieces(x)
+        return x.memo
+
+    def _lin(self, x) -> Lin:
+        return x if isinstance(x, Lin) else lin_of(self.real(x))
+
+    def _boolish(self, x):
+        """An i1 value as a Bool (or a Python bool)."""
+        if isinstance(x, (bool, Bool)):
+            return x
+        if isinstance(x, int):
+            return bool(x)
+        w = self.real(x)
+        b = atom(w, "!=", 0)
+        b.memo = w  # already 0/1
+        return b
+
+    def _caseable(self, x):
+        return x if isinstance(x, (int, Wire, Pieces)) else self.real(x)
+
+    def _conds(self, b: Bool) -> list[Cond]:
+        return [
+            Cond(_operand(at.a), at.cmp, _operand(at.b), join="or" if j == 0 and i > 0 else "and")
+            for i, clause in enumerate(b.clauses)
+            for j, at in enumerate(clause)
+        ]
+
+    def _leaves(self, b: Bool) -> list[Lowered]:
+        return [x for clause in b.clauses for at in clause for x in (at.a, at.b)]
+
+    def _place_lin(self, x: Lin) -> Wire:
+        out = self.b.local_signal()
+        terms = list(x.terms.items())
+        k = x.const
+        label = f"{out} = linear sum"
+        if len(terms) == 2 and k == 0 and {c for _, c in terms} <= {1, -1} and any(c == 1 for _, c in terms):
+            (a, ca), (b, cb) = terms if terms[0][1] == 1 else terms[::-1]
+            self.b.place(Arithmetic(_operand(a), "+" if cb == 1 else "-", _operand(b), out, label=label), _colors(a, b), GREEN)
+        elif len(terms) == 1 and (k == 0 or terms[0][1] == 1):
+            (a, c), = terms
+            self.b.place(Arithmetic(_operand(a), "*" if c != 1 else "+", c if c != 1 else k, out, label=label), _colors(a), GREEN)
+        else:
+            for w, c in terms:
+                self.b.place(Arithmetic(_operand(w), "*" if c != 1 else "+", c if c != 1 else 0, out, label=label), _colors(w), GREEN)
+            if k:
+                self.b.place(Constant({out: k}, label=f"{label} (+ {k})"), (), GREEN)
+        return Wire(out, _depth(*x.terms) + 1)
+
+    def _place_bool(self, x: Bool) -> Wire:
+        out = self.b.local_signal()
+        leaves = self._leaves(x)
+        self.b.place(Decider(self._conds(x), [Out(out, copy=False, constant=1)], label=f"{out} = condition"), _colors(*leaves), GREEN)
+        return Wire(out, _depth(*leaves) + 1)
+
+    def _place_pieces(self, x: Pieces) -> Lowered:
+        out = self.b.local_signal()
+        cases = [(g, v) for g, v in x.cases if v != 0]
+        guards = [leaf for g, _ in cases for leaf in self._leaves(g)]
+        label = f"{out} = case"
+        def guard_depth(g: Bool) -> int:
+            return g.memo.depth if g.memo is not None else _depth(*self._leaves(g)) + 1
+
+        # Either multiply each value by its placed guard (0 or 1) onto the result
+        # signal, or gate the values onto a private net and rename: whichever is
+        # ready first.
+        by_product = max(_depth(*self._leaves(g)) + 1 if isinstance(v, int) else max(_depth(v), guard_depth(g)) + 1 for g, v in cases)
+        by_rename = _depth(*guards, *(v for _, v in cases)) + 2
+        if by_product <= by_rename:
+            for g, v in cases:
+                if isinstance(v, int):
+                    self.b.place(Decider(self._conds(g), [Out(out, copy=False, constant=v)], label=label), _colors(*self._leaves(g)), GREEN)
+                else:
+                    flag = self.real(g)
+                    self.b.place(Arithmetic(_operand(v), "*", _operand(flag), out, label=f"{label} (value * guard)"), _colors(v, flag), GREEN)
+            return Wire(out, by_product)
+        # Deciders cannot rename: each case passes its value under its own name
+        # onto a private net, and Each + 0 sums that net into the result.
+        private = self.b.nl.net(GREEN, f"cases {out}")
+        for g, v in cases:
+            o = Out(v.signal, networks=v.color) if isinstance(v, Wire) else Out(PRIVATE_CONSTANT, copy=False, constant=v)
+            self.b.place(Decider(self._conds(g), [o], label=f"{label} (pass)"), _colors(*self._leaves(g), v), private)
+        rename = Arithmetic(Sig(EACH, frozenset({GREEN})), "+", 0, out, label=f"{label} (rename)")
+        self.b.place(rename, (), GREEN)
+        private.attach(rename.inp)
+        return Wire(out, _depth(*guards, *(v for _, v in cases)) + 2)
+
+    def lazy_op(self, op: Op):
+        """``op`` as a lazy form, or NotImplemented to place it the plain way."""
+        raw = [self.get_raw(a) for a in op.args]
+        if not all(isinstance(x, (int, Wire, Lin, Bool, Pieces)) for x in raw):
+            return NotImplemented
+        try:
+            r = self._lazy(op, raw)
+        except TooBig:
+            # Too many conditions for one decider: place the operands first.
+            try:
+                r = self._lazy(op, [self.real(x) for x in raw])
+            except TooBig:
+                return NotImplemented
+        if isinstance(r, bool):
+            return int(r)
+        return simple(r) if isinstance(r, Lin) else r
+
+    def _cmp(self, pred: str, a, b):
+        """``a pred b`` (icmp predicate) as a Bool, over the cases of each side."""
+        out = False
+        ca, cb = cases_of(self._caseable(a)), cases_of(self._caseable(b))
+        if len(ca) * len(cb) > 8:
+            raise TooBig
+        for g, v in ca:
+            for h, u in cb:
+                c = atom(v, _ICMP[pred], u) if pred in _ICMP else unsigned_atom(v, pred, u)
+                if c is None:
+                    raise TooBig
+                out = bor(out, band(band(g, h), c))
+        return out
+
+    def _lazy(self, op: Op, raw: list):
+        opc, w = op.opcode, op.result.width
+        widths = [a.width if isinstance(a, Value) else None for a in op.args]
+        if opc in ("zext", "freeze") or (opc in ("trunc", "sext") and widths[0] == w):
+            return raw[0]
+        if w == 1 and opc in ("and", "or", "xor"):
+            a, b = (self._boolish(x) for x in raw)
+            if opc == "and":
+                return band(a, b)
+            if opc == "or":
+                return bor(a, b)
+            return bor(band(a, bnot(b)), band(bnot(a), b))
+        if opc == "icmp":
+            pred = op.predicate or ""
+            a, b = raw
+            if widths[0] == 1:
+                if pred not in ("eq", "ne"):
+                    return NotImplemented
+                a, b = (self._boolish(x) for x in raw)
+                same = bor(band(a, b), band(bnot(a), bnot(b)))
+                return same if pred == "eq" else bnot(same)
+            if pred in ("eq", "ne") and (isinstance(a, Lin) or isinstance(b, Lin)):
+                # Equality survives wrapping, so a + k == b + j is a == b + (j - k).
+                d = lin_add(self._lin(a), self._lin(b), -1)
+                cmp = _ICMP[pred]
+                if isinstance(d, int):
+                    return compare(cmp, d, 0)
+                terms = list(d.terms.items())
+                if len(terms) == 1 and terms[0][1] in (1, -1):
+                    (t, c), = terms
+                    return atom(t, cmp, wrap(-d.const * c))
+                if len(terms) == 2 and not d.const and terms[0][1] == -terms[1][1] and terms[0][1] in (1, -1):
+                    return atom(terms[0][0], cmp, terms[1][0])
+            return self._cmp(pred, a, b)
+        if opc == "select":
+            c = self._boolish(raw[0])
+            if w == 1:
+                t, f = (self._boolish(x) for x in raw[1:])
+                if f is False or t is True:  # c && t, c || f
+                    return bor(band(c, t), f)
+                return bor(band(c, t), band(bnot(c), f))
+            t, f = (cases_of(self._caseable(x)) for x in raw[1:])
+            return pieces([(band(c, g), v) for g, v in t] + [(band(bnot(c), g), v) for g, v in f])
+        if opc in ("smax", "smin", "umax", "umin"):
+            pred = {"smax": "sgt", "smin": "slt", "umax": "ugt", "umin": "ult"}[opc]
+            ca, cb = (cases_of(self._caseable(x)) for x in raw)
+            out = []
+            for g, v in ca:
+                for h, u in cb:
+                    first = self._cmp(pred, v, u)
+                    gh = band(g, h)
+                    out += [(band(gh, first), v), (band(gh, bnot(first)), u)]
+            return pieces(out)
+        if w > 1 and opc == "or" and " or disjoint " in f" {op.text} ":
+            opc = "add"  # no common bits: the same as adding
+        if w > 1 and opc in ("add", "sub"):
+            return lin_add(self._lin(raw[0]), self._lin(raw[1]), 1 if opc == "add" else -1)
+        if w > 1 and opc == "mul" and (isinstance(raw[0], int) or isinstance(raw[1], int)):
+            k, x = (raw[0], raw[1]) if isinstance(raw[0], int) else (raw[1], raw[0])
+            return lin_scale(self._lin(x), k)
+        if w > 1 and opc == "shl" and isinstance(raw[1], int):
+            return lin_scale(self._lin(raw[0]), wrap(1 << (raw[1] & 31)))
+        return NotImplemented
 
     def set(self, v: Value, x: Lowered) -> None:
         self.env[id(v)] = x
@@ -251,7 +448,10 @@ class _Lowerer:
 
     # ---- instructions
 
-    def op(self, op: Op) -> Lowered:
+    def op(self, op: Op):
+        lazy = self.lazy_op(op)
+        if lazy is not NotImplemented:
+            return lazy
         args = [self.get(a) for a in op.args]
         widths = [a.width if isinstance(a, Value) else None for a in op.args]
         label = op.text
