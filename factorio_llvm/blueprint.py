@@ -23,7 +23,9 @@ from .netlist import (
     Cond,
     Connector,
     Constant,
+    Gate,
     Lamp,
+    Wall,
     Message,
     Panel,
     Decider,
@@ -139,6 +141,13 @@ def _control_behavior(e: Entity) -> dict[str, Any]:
             return {"use_colors": True, "color_mode": 2, "rgb_signal": _signal(e.rgb)}
         assert e.condition is not None
         return {"circuit_enabled": True, "circuit_condition": _plain_cond(e.condition)}
+    if isinstance(e, Wall):
+        return {
+            "circuit_open_gate": True,
+            "circuit_condition": _plain_cond(e.condition),
+            "circuit_read_sensor": True,
+            "output_signal": _signal(e.sensor),
+        }
     if isinstance(e, Panel):
         return {
             "parameters": [
@@ -156,7 +165,7 @@ def _control_behavior(e: Entity) -> dict[str, Any]:
     raise TypeError(type(e).__name__)
 
 
-_PROTOTYPE = {Panel: "display-panel", Lamp: "small-lamp", Pole: "substation", Constant: "constant-combinator", Arithmetic: "arithmetic-combinator", Decider: "decider-combinator"}
+_PROTOTYPE = {Wall: "stone-wall", Gate: "gate", Panel: "display-panel", Lamp: "small-lamp", Pole: "substation", Constant: "constant-combinator", Arithmetic: "arithmetic-combinator", Decider: "decider-combinator"}
 
 
 def _position(e: Entity, slot: int) -> tuple[float, float]:
@@ -165,13 +174,13 @@ def _position(e: Entity, slot: int) -> tuple[float, float]:
     col, row = slot % COLUMNS, slot // COLUMNS
     # Two-tile combinators face north (input south, output north); a 1x1
     # constant combinator sits in the top tile of its slot.
-    if isinstance(e, (Constant, Lamp, Panel)):
+    if isinstance(e, (Constant, Lamp, Panel, Wall, Gate)):
         return (col + 0.5, row * 3 + 0.5)
     return (col + 0.5, row * 3 + 1.0)
 
 
 def _connector_id(c: Connector, color: Color) -> int:
-    if isinstance(c.entity, (Constant, Pole, Lamp, Panel)):
+    if isinstance(c.entity, (Constant, Pole, Lamp, Panel, Wall)):
         return 1 if color == RED else 2
     base = 1 if c.side == "in" else 3
     return base + (0 if color == RED else 1)
@@ -221,7 +230,10 @@ def to_blueprint(netlist: Netlist, label: str = "factorio-llvm") -> dict[str, An
             "name": _PROTOTYPE[type(e)],
             "position": {"x": x, "y": y},
         }
-        if not isinstance(e, Pole):
+        if isinstance(e, Gate):
+            # Unverified in game: 2.0 directions are 0..15, north = 0, east = 4.
+            ent["direction"] = 0 if e.vertical else 4
+        elif not isinstance(e, Pole):
             ent["control_behavior"] = _control_behavior(e)
         if isinstance(e, Lamp):
             ent["always_on"] = True  # lit in daylight too
@@ -289,6 +301,10 @@ def _entity_in(d: dict[str, Any]) -> Entity:
         if cb.get("use_colors") and cb.get("color_mode") == 2:
             return Lamp(rgb=cb["rgb_signal"]["name"], label=label, position=pos)
         return Lamp(_cond_in(cb["circuit_condition"]), label=label, position=pos)
+    if name == "stone-wall":
+        return Wall(_cond_in(cb["circuit_condition"]), cb["output_signal"]["name"], label=label, position=pos)
+    if name == "gate":
+        return Gate(d.get("direction", 0) == 0, label=label, position=pos)
     if name == "display-panel":
         msgs = [Message(_cond_in(m["condition"]), m["icon"]["name"], m.get("text", "")) for m in cb.get("parameters", [])]
         icon = d.get("icon", {}).get("name")
@@ -343,7 +359,7 @@ def from_blueprint(obj: dict[str, Any]) -> Netlist:
     def conn(n: int, cid: int) -> tuple[Connector, Color]:
         e = by_number[n]
         color = RED if cid in (1, 3) else GREEN
-        side = "out" if isinstance(e, (Constant, Pole)) or cid in (3, 4) else "in"
+        side = "out" if isinstance(e, (Constant, Pole, Wall)) or cid in (3, 4) else "in"
         return Connector(e, side), color
 
     for a, ca, b, cb in bp.get("wires", []):

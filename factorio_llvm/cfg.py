@@ -84,6 +84,7 @@ class _CfgLowerer(_Lowerer):
         self.io_choice = io or {}
         self.screen_width = screen_width
         self.step = self.b.reserve(STEP)
+        self.reset_signal = self.b.reserve(RESET)
         self.local: dict[int, Lowered] = {}
         self.regs: dict[int, Register] = {}  # value id -> register
         self.def_block: dict[int, str] = {}
@@ -271,7 +272,7 @@ class _CfgLowerer(_Lowerer):
         self.b.place(Arithmetic(Sig(self.step, frozenset({RED})), "+", 0, self.step, label="step counter S"), (RED,), RED)
         # Reset: while this constant is on, S * R = -S cancels the count and S
         # stays at 1. Blueprints are placed with it on; turn it off to run.
-        reset_signal = self.b.reserve(RESET)
+        reset_signal = self.reset_signal
         reset = self.b.place(Constant({reset_signal: -1}, label="RESET: turn off to run"), (), RED)
         self._tag(reset.out, "RESET (turn off to run)", "signal-R")
         self.b.place(
@@ -286,6 +287,7 @@ class _CfgLowerer(_Lowerer):
         for p in self.fn.params:
             s = self.b.signal()
             params.append(self.b.place(Constant({s: 0}, label=f"argument %{p.name} = {rich_text(s)}"), (), RED, group="arguments"))
+            self.b.tag(params[-1].out, f"argument %{p.name}", s, group="arguments")
             param_signals.append(s)
             self.env[id(p)] = Wire(s, 0, RED)
             self.names[p.name] = s
@@ -368,10 +370,19 @@ class _CfgLowerer(_Lowerer):
         inputs, in_terminal, io = None, None, {}
         if self.mem is not None:
             io = self.mem.assign_io(self.io_choice, {result.signal, DONE})
-            if any(bank.is_input for bank in self.mem.banks.values()):
+            banks = list(self.mem.banks.values())
+            ins = [b for b in banks if b.is_input]  # the joystick has its own net
+            if ins:
+                # Every input word starts at 0 here: set it in the terminal, or
+                # wire the factory to it.
                 inputs = self.b.nl.net(RED, "INPUT")
-                in_terminal = self.b.place(Constant({}, label="INPUT: wire the factory here"), (), inputs)
+                zeros = {sig: 0 for b in ins for sig in b.io}
+                label = "INPUT: wire the factory here, or set values here.\n" + _io_lines(ins)
+                in_terminal = self.b.place(Constant(zeros, label=label), (), inputs)
                 self._tag(in_terminal.out, "INPUT", "signal-I")
+            outs = [b for b in banks if b.array.external and b.side == "OUTPUT"]
+            if outs:
+                out_terminal.label += "\n" + _io_lines(outs)
             self.mem.build(inputs, output, self.screen_width)
         unknown = set(self.io_choice) - set(io)
         if unknown:
@@ -415,12 +426,7 @@ class _CfgLowerer(_Lowerer):
         return _depth(*(x.index if isinstance(x, Ptr) else x for x in needed))
 
     def _tag(self, terminal: Connector, text: str, icon: str) -> None:
-        """A display panel naming ``terminal``, on a green wire so it is placed next to it."""
-        # A wired panel shows only its messages, so give it one that always holds
-        # (signal-dot is never on the wire, so it reads 0).
-        always = Message(Cond(Sig("signal-dot", frozenset({GREEN})), "=", 0), icon, text)
-        tag = self.b.place(Panel([always], text=text, icon=icon, always_show=True, label=text))
-        self.b.nl.net(GREEN, f"tag {text}").attach(terminal, tag.inp)
+        self.b.tag(terminal, text, icon)
 
     def _keep(self, bs: BlockSchedule, r: Register, v: Operand, label: str) -> None:
         if not any(w.register is r for w in bs.writes):
@@ -460,6 +466,11 @@ class _CfgLowerer(_Lowerer):
             go(t.targets[0], [Test(c, "!=", val, _name(t.cond)) for val, _ in t.cases], " (default)")
         else:
             raise Unsupported(f"terminator {t.kind}")
+
+
+def _io_lines(banks) -> str:
+    """One description line per word: ``@in[0] = <icon>``."""
+    return "\n".join(f"@{b.array.name}[{i}] = {rich_text(sig)}" for b in banks for i, sig in enumerate(b.io))
 
 
 def _name(v: Operand) -> str:

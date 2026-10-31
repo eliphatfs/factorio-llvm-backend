@@ -121,6 +121,30 @@ class Lamp(Entity):
     rgb: str | None = None
 
 
+@dataclass(eq=False)
+class Wall(Entity):
+    """A stone wall next to a gate. It opens the gate while ``condition`` holds,
+    and outputs ``sensor`` = 1 while the gate's sensor sees a player walking
+    into it. ``pressed`` stands in for that player in simulation. Its one
+    connection point is modelled as the output side."""
+
+    condition: "Cond"
+    sensor: str
+    pressed: bool = False
+
+    has_input = False
+
+
+@dataclass(eq=False)
+class Gate(Entity):
+    """A gate (1x1): ``vertical`` sits in a north-south wall line. No circuit
+    connection of its own; the wall in line with it controls it."""
+
+    vertical: bool = True
+
+    has_input = False
+
+
 @dataclass(frozen=True)
 class Message:
     """One display panel message: shown while ``condition`` holds."""

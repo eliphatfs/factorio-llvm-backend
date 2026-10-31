@@ -8,12 +8,13 @@ Without --function, it compiles main, or the only function in the file.
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
 from .blueprint import export_string
 from .cfg import SteppedCompiled
-from .frontend import Unsupported, compile_c, read_function
+from .frontend import Unsupported, compile_c, read_function, screen_width_of
 from .lower import lower
 
 
@@ -31,11 +32,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--screen-width", type=int, help="lamps per row for extern screen* arrays (default: square)")
     p.add_argument("--schedule", action="store_true", help="print the step schedule of a function with control flow")
+    p.add_argument("--unroll", type=int, default=1, help="unroll every loop N times (default: only #pragma unroll loops)")
     p.add_argument("--emit-llvm", action="store_true", help="print the LLVM IR clang produced and stop")
     p.add_argument("--no-blueprint", action="store_true", help="do not print the blueprint string")
     ns = p.parse_args(argv)
 
-    ir = compile_c(ns.source) if ns.source.suffix == ".c" else ns.source.read_text()
+    try:
+        ir = compile_c(ns.source, unroll=ns.unroll) if ns.source.suffix == ".c" else ns.source.read_text()
+    except subprocess.CalledProcessError as e:
+        print(e.stderr, end="", file=sys.stderr)
+        return 1
     if ns.emit_llvm:
         print(ir)
         return 0
@@ -44,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
         for spec in ns.io:
             name, _, sigs = spec.partition("=")
             io[name] = [x.strip() for x in sigs.split(",") if x.strip()]
-        compiled = lower(read_function(ir, ns.function), io, ns.screen_width)
+        compiled = lower(read_function(ir, ns.function), io, ns.screen_width or screen_width_of(ir))
     except Unsupported as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -64,7 +70,9 @@ def main(argv: list[str] | None = None) -> int:
     if stepped:
         print(f"  OUTPUT terminal: {compiled.result} = result and signal-check = 1 once halted", file=sys.stderr)
         for name, sigs in compiled.io.items():
-            if name.startswith("screen") and not _reads_only(compiled, name):
+            if name == "joystick" and _reads_only(compiled, name):
+                side = "joystick cage"
+            elif name.startswith("screen") and not _reads_only(compiled, name):
                 side = "lamp screen (packed RGB)"
             else:
                 side = "INPUT terminal" if _reads_only(compiled, name) else "OUTPUT terminal"

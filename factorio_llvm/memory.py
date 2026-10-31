@@ -60,7 +60,7 @@ from dataclasses import dataclass, field
 from .frontend import Array
 from .frontend import Unsupported
 from .lower import Lowered, Wire, _Builder
-from .netlist import GREEN, RED, Color, Arithmetic, Cond, Constant, Decider, Lamp, Net, Out, Sig
+from .netlist import GREEN, RED, Color, Arithmetic, Cond, Constant, Decider, Gate, Lamp, Net, Out, Sig, Wall
 from .signals import EACH, allocatable_signals
 
 ADDRESS = "signal-A"
@@ -96,7 +96,11 @@ class _Bank:
 
     @property
     def is_input(self) -> bool:
-        return self.array.external and not self.stored
+        return self.array.external and not self.stored and not self.is_joystick
+
+    @property
+    def is_joystick(self) -> bool:
+        return self.array.external and not self.stored and self.array.name == "joystick"
 
     @property
     def is_screen(self) -> bool:
@@ -105,6 +109,8 @@ class _Bank:
     @property
     def side(self) -> str:
         """Which net its I/O signals are on."""
+        if self.is_joystick:
+            return "joystick"
         return "INPUT" if self.is_input else f"screen {self.array.name}" if self.is_screen else "OUTPUT"
 
 
@@ -159,12 +165,15 @@ class Memory:
                 continue
             side = bank.side
             used.setdefault(side, set())
+            if bank.is_joystick and a.size != len(JOYSTICK):
+                raise Unsupported(f"@joystick must have {len(JOYSTICK)} words (one per direction), not {a.size}")
             if a.name in chosen:
                 sigs = chosen[a.name]
                 if len(sigs) != a.size:
                     raise Unsupported(f"--io {a.name}: {len(sigs)} signals for {a.size} words")
             else:
-                sigs = [s for s in _IO_ORDER if s not in used[side]][: a.size]
+                pool = JOYSTICK if bank.is_joystick else _IO_ORDER
+                sigs = [s for s in pool if s not in used[side]][: a.size]
                 if len(sigs) < a.size:
                     raise Unsupported(f"@{a.name} has more words than there are signals")
             clash = used[side] & set(sigs)
@@ -193,6 +202,9 @@ class Memory:
     def build(self, inputs: Net | None, outputs: Net, screen_width: int | None = None) -> None:
         """Place every chunk and its readers."""
         screen_x = 0
+        joystick = None
+        if any(b.is_joystick for b in self.banks.values()):
+            joystick = self._joystick()
         for bank in self.banks.values():
             a = bank.array
             group = f"array {a.name}"
@@ -201,7 +213,7 @@ class Memory:
                 words = list(zip(sigs, a.init[base : base + CHUNK]))
                 loop = self.b.nl.net(GREEN, f"{a.name}[{base}..]")
                 bank.loops.append(loop)
-                self._chunk(bank, base, words, loop, inputs, outputs, group)
+                self._chunk(bank, base, words, loop, joystick if bank.is_joystick else inputs, outputs, group)
                 if bank.is_screen:
                     screen_x = self._screen(bank, loop, screen_width, screen_x)
             # Readers port by port, each with its own copy of the chunk's key,
@@ -211,6 +223,28 @@ class Memory:
                     words = list(zip(sigs, a.init[base : base + CHUNK]))
                     key_net = self._key(a, base, words, group, GREEN if port.address.color == RED else RED)
                     self._reader(bank, base, j, port, key_net, bank.loops[c], group)
+
+    def _joystick(self) -> Net:
+        """Place the joystick cage left of the screen; return the net its walls report on.
+
+        The player stands on the middle tile, boxed in by 8 closed gates. Walking
+        into one fires its sensor, and the wall in line with it outputs that
+        direction's signal. An off switch opens every gate to get in and out."""
+        net = self.b.nl.net(RED, "joystick")
+        exit_switch = Constant({JOYSTICK_EXIT: 1}, enabled=False, label="joystick gates: switch on to get in or out")
+        net.attach(self.b.place(exit_switch, (), None, "joystick").out)
+        self.b.tag(exit_switch.out, "JOYSTICK: switch on to open the gates", "signal-X", group="joystick")
+        cx, cy = JOYSTICK_CENTRE
+        opened = Cond(Sig(JOYSTICK_EXIT, frozenset({RED})), ">", 0)
+        for sig, (dx, dy) in zip(JOYSTICK, _JOYSTICK_STEPS):
+            # Diagonal gates stand north-south, with the wall above or below.
+            vertical = dx == 0 or dy != 0
+            wx, wy = (dx, 2 * dy) if vertical else (2 * dx, dy)
+            gate = Gate(vertical=vertical, label=f"joystick {sig} gate", position=(cx + dx + 0.5, cy + dy + 0.5))
+            wall = Wall(opened, sig, label=f"joystick {sig}", position=(cx + wx + 0.5, cy + wy + 0.5))
+            self.b.place(gate, (), None, "screen")
+            self.b.place(wall, (), net, "screen")
+        return net
 
     def _key(self, a: Array, base: int, words: list[tuple[str, int]], group: str, color: Color = GREEN) -> Net:
         net = self.b.nl.net(color, f"{a.name}[{base}..] key")
@@ -225,9 +259,9 @@ class Memory:
         a = bank.array
         name = f"{a.name}[{base}..]"
         s_red = Sig(self.step, frozenset({RED}))
-        if bank.is_input:
+        if bank.is_input or bank.is_joystick:
             assert inputs is not None
-            copy = Arithmetic(Sig(EACH, frozenset({RED})), "+", 0, EACH, label=f"{name} <- INPUT")
+            copy = Arithmetic(Sig(EACH, frozenset({RED})), "+", 0, EACH, label=f"{name} <- {bank.side}")
             self.b.place(copy, (), loop, group)
             inputs.attach(copy.inp)
             return
@@ -295,7 +329,13 @@ class Memory:
         mask.attach(reader.inp)
         loop.attach(reader.inp)
 
-MAX_SCREEN_ROWS = 16  # two rows of substations power at most this many
+MAX_SCREEN_ROWS = 16
+
+# extern volatile int joystick[8]: N, NE, E, SE, S, SW, W, NW (see include/factorio.h).
+JOYSTICK = ("up-arrow", "up-right-arrow", "right-arrow", "down-right-arrow", "down-arrow", "down-left-arrow", "left-arrow", "up-left-arrow")
+_JOYSTICK_STEPS = ((0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1))
+JOYSTICK_EXIT = "signal-X"
+JOYSTICK_CENTRE = (-6, -5)  # the player's tile, left of the screen  # two rows of substations power at most this many
 
 
 # Default I/O signals: digits, then letters, then the rest.

@@ -17,7 +17,7 @@ dev = ["pytest>=8"]
 packages = ["factorio_llvm"]
 
 [tool.setuptools.package-data]
-factorio_llvm = ["data/*.json"]
+factorio_llvm = ["data/*.json", "include/*.h"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

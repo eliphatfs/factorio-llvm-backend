@@ -44,6 +44,7 @@ are placed with the `RESET` constant combinator switched on, which holds `S` at
 1; switch it off to run, and on and off again to rerun with new arguments.
 
 C is compiled with `clang -O2` plus flags that stop vectorisation, unrolling
+(except `#pragma unroll` loops, or every loop with `--unroll N`)
 and closed-form loop exit values (`factorio_llvm.frontend.CLANG_FLAGS`).
 
 M3 supports fixed-size `i32` arrays: local (`alloca`) or global, with or
@@ -72,6 +73,16 @@ terminal. Signals default to `signal-0`, `signal-1`, ...; pick them with
 is a lamp screen instead: a grid of lamps above the circuit, each showing its
 word as a packed `0xRRGGBB` colour (`--screen-width` sets the row length, at
 most 16 rows).
+
+`#include <factorio.h>` (found automatically) declares these devices with
+docs and helpers: define `SCREEN_W`/`SCREEN_H` first for `screen[]` (its width
+also sets the lamp layout), plus `RGB()` and colour names. `joystick[8]` is an
+8-direction joystick (`JOY_N` .. `JOY_NW`, or `joy_dx()`/`joy_dy()`): a cage
+of 8 gates left of the screen. Switch on the tagged constant to open the gates,
+stand on the middle tile, switch it off, then walk with WASD; each gate's wall
+reports its arrow signal. See `examples/joystick.c`. Gate orientation and the
+wall's circuit settings follow an in-game experiment but the exported
+blueprint is untested in game.
 
 ## Usage
 
