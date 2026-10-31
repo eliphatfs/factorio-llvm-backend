@@ -52,9 +52,12 @@ without initial values, and constant globals as ROM tables. `getelementptr`,
 for indices and computed in 32 bits. Arrays are stored in chunks of 395 words (one per
 usable signal) on a private loop: a chunk costs about 5 combinators and each
 read port 2 more per chunk, whatever its size, and a load costs 5 ticks on top
-of its address. A block is split after a store only when a later
-store, or a load of the same array, follows it in the block, so a store takes
-effect before that load. Memory is cleared (or reset to its initial
+of its address. Each store in a block gets its own write port, so
+stores whose addresses differ by a constant (`a[i]`, `a[i + 1]`, ... as
+`#pragma unroll` produces) run in the same block; a block is split before a
+load of an array it already wrote and before a store that may hit a word it
+wrote. Loads in a block each get a read port and run in parallel. See
+`examples/m5.c`. Memory is cleared (or reset to its initial
 values) while `RESET` is on. Not supported: pointer arguments, pointers that
 may point into different arrays, other element types, `memcpy`.
 

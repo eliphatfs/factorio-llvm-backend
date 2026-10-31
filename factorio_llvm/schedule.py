@@ -108,12 +108,14 @@ class Store:
     value: Lowered = 0
     clear: bool = False
     sources: tuple[str, str] = ("", "")
+    port: int = 0  # bus write port
+
 
     def __str__(self) -> str:
         if self.clear:
-            return f"@{self.step}  clear {self.array}"
+            return f"@{self.step}  clear {self.array}  (write port {self.port})"
         a, v = self.sources
-        return f"@{self.step}  {self.array}[{_show(self.address, a)}] <- {_show(self.value, v)}"
+        return f"@{self.step}  {self.array}[{_show(self.address, a)}] <- {_show(self.value, v)}  (write port {self.port})"
 
 
 @dataclass

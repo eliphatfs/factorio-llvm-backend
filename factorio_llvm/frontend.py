@@ -382,40 +382,76 @@ def _array_of(op: Op) -> Array | None:
     return ptr if isinstance(ptr, Array) else getattr(ptr, "array", None)
 
 
-def _conflicts(write: Op, rest: list[Op]) -> bool:
-    """Whether an op in ``rest`` must see ``write``'s effect, or would share its bus step."""
-    target = _array_of(write)
-    for op in rest:
-        if op.opcode in ("store", "clear"):
-            return True
-        if op.opcode == "load" and (target is None or _array_of(op) in (None, target)):
-            return True
-    return False
+_Affine = tuple[frozenset[tuple[int, int]], int]  # ({(value id, coefficient)}, constant)
+
+
+def _affine(v: Operand, defs: dict[int, Op], depth: int = 0) -> _Affine:
+    """``v`` as a sum of opaque values plus a constant, looking through adds,
+    disjoint ors, casts and geps."""
+    if isinstance(v, int):
+        return frozenset(), v
+    if isinstance(v, Array):
+        return frozenset(), 0
+    op = defs.get(id(v))
+    if op is not None and depth < 32:
+        a = op.args
+        add = op.opcode == "add" or (op.opcode == "or" and " disjoint " in op.text) or op.opcode == "gep"
+        if add or op.opcode == "sub":
+            (xs, xc), (ys, yc) = (_affine(x, defs, depth + 1) for x in a[:2])
+            if op.opcode == "sub":
+                ys, yc = frozenset((k, -c) for k, c in ys), -yc
+            terms: dict[int, int] = {}
+            for k, c in (*xs, *ys):
+                terms[k] = terms.get(k, 0) + c
+            return frozenset((k, c) for k, c in terms.items() if c), xc + yc
+        if op.opcode in ("sext", "zext", "trunc", "freeze"):
+            return _affine(a[0], defs, depth + 1)
+    return frozenset({(id(v), 1)}), 0
 
 
 def split_after_stores(fn: Function) -> Function:
-    """End a block after a store or clear when the rest of it needs that.
+    """Split blocks where a memory op must see an earlier store or clear.
 
-    A block's stores all go onto the bus at its gate step, and the array
-    changes only after the block, so it ends after a store or clear that is
-    followed in it by another store or clear, or by a load of the same array.
+    A block's stores all go out at its gate step, each on its own write port,
+    and arrays change only after the block. So a new block starts before a
+    load or clear of an array the block already wrote, and before a store that
+    may hit a word the block already wrote or cleared. Two stores to one
+    array share a block only if their addresses differ by a constant (``i``
+    and ``i + 1``, as unrolled loops produce).
 
     The block keeps its name for the part that runs first (branches go there);
     successors' phis are told about the part that now ends with the terminator.
     """
+    defs = {id(op.result): op for b in fn.blocks for op in b.ops}
     renamed: dict[str, str] = {}
     blocks: list[Block] = []
     for b in fn.blocks:
         piece = Block(b.name, b.phis)
         n = 0
-        for i, op in enumerate(b.ops):
-            piece.ops.append(op)
-            if op.opcode in ("store", "clear") and _conflicts(op, b.ops[i + 1 :]):
+        written: list[tuple[Array | None, _Affine | None]] = []  # this piece's stores (None: clear)
+
+        def must_split(op: Op) -> bool:
+            if op.opcode not in ("load", "store", "clear"):
+                return False
+            arr = _array_of(op)
+            mine = [w for w in written if arr is None or w[0] is None or w[0] is arr]
+            if op.opcode == "load" or op.opcode == "clear":
+                return bool(mine)
+            addr = _affine(op.args[1], defs)
+            return any(w[1] is None or w[1][0] != addr[0] or w[1][1] == addr[1] for w in mine)
+
+        for op in b.ops:
+            if must_split(op):
                 n += 1
                 nxt = Block(f"{b.name}.{n}")
-                piece.term = Term("br", [nxt.name], text=f"br label %{nxt.name}  ; after {op.text}")
+                piece.term = Term("br", [nxt.name], text=f"br label %{nxt.name}  ; before {op.text}")
                 blocks.append(piece)
-                piece = nxt
+                piece, written = nxt, []
+            piece.ops.append(op)
+            if op.opcode == "store":
+                written.append((_array_of(op), _affine(op.args[1], defs)))
+            elif op.opcode == "clear":
+                written.append((_array_of(op), None))
         piece.term = b.term
         blocks.append(piece)
         if piece.name != b.name:
