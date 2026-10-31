@@ -116,9 +116,12 @@ class Store:
     port: int = 0  # bus write port
     wave: int = 0  # steps after the block's first stores (see split_after_stores)
     enable: Lowered | None = None  # E to send when guarded: array id (or -id) if the guard holds, else 0
+    delay: int | None = None  # pipelined loop: ticks after its iteration starts, not a step
 
 
     def __str__(self) -> str:
+        if self.delay is not None:
+            return f"iteration +{self.delay}  " + Store.__str__(Store(**{**self.__dict__, "delay": None})).split("  ", 1)[1]
         if self.clear:
             return f"@{self.step}  clear {self.array}  (write port {self.port})"
         a, v = self.sources
@@ -134,6 +137,9 @@ class BlockSchedule:
     jumps: list[Jump] = field(default_factory=list)
     loads: list[Load] = field(default_factory=list)
     stores: list[Store] = field(default_factory=list)
+    pipelined: bool = False  # a loop whose iterations overlap (see cfg.py)
+    drain: int = 0  # steps after the jump for a pipelined loop's last stores
+    prologue: int = 0  # a pipelined loop's steps before its first iteration starts
 
     @property
     def gate(self) -> int:
@@ -145,6 +151,8 @@ class BlockSchedule:
 
     def __str__(self) -> str:
         lines = [f"block {self.name}  steps {self.base}..{self.jump}  (depth {self.depth})"]
+        if self.pipelined:
+            lines[0] += f"  pipelined: a new iteration every {self.jump - self.base - self.prologue + 1} ticks, prologue {self.prologue}, drain {self.drain}"
         lines += [f"  @{self.base}..{self.jump}  {x}" for x in self.loads]
         lines += [f"  {x}" for x in (*self.writes, *self.stores, *self.jumps)]
         return "\n".join(lines)
