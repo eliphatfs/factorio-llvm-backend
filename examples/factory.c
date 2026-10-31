@@ -144,22 +144,15 @@ int count[2];        /* how many belts, inserters */
 int dirty[2 * NT]; /* tiles to redraw this frame (setup queues all of them) */
 int ndirty, frame;
 extern volatile int walk[1], hold[1]; /* the two input terminals */
-volatile int input[2]; /* this frame's inputs, copied once (see read_input) */
-
-/* An input can change in the middle of a block, and a block that computes
-   from it directly could then see half the old and half the new state.
-   Copying it to memory first and computing from the copy (a later block,
-   since a load after a store to the same array starts one) keeps every frame
-   consistent. */
+/* The compiler latches inputs, so a block that reads them sees one
+   consistent value even if a button changes mid-block. */
 #ifndef HOST_POLL
 #define HOST_POLL() /* a native test harness can step its inputs here */
 #endif
 static inline void read_input(int *w, int *h) {
     HOST_POLL();
-    input[0] = walk[0];
-    input[1] = hold[0];
-    *w = input[0];
-    *h = input[1];
+    *w = walk[0];
+    *h = hold[0];
 }
 static inline int step_x(int d) { return (d == 0) - (d == 2); }
 static inline int step_y(int d) { return (d == 1) - (d == 3); }

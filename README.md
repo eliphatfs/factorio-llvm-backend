@@ -122,9 +122,9 @@ Start with `#include <factorio.h>` (found automatically). It declares:
   constant combinator to open the cage door, stand on the middle tile, switch
   it off, then hold WASD; leaning towards a gate trips its sensor. See
   `examples/joystick.c`. The joystick layout has not yet been tested in game.
-  If the joystick changes while a block is computing from it, the result can
-  mix old and new state; copy `joystick[]` into a `volatile` array first and
-  compute from the copy (`examples/factory.c` does this with its inputs).
+  Input reads (joystick and input terminals) are latched: a block that
+  reads an input sees one consistent value even if it changes mid-block (it
+  may be the value from up to a block ago, but costs no extra ticks).
 - **`ticks()`**, a free-running game-tick counter.
 
 ### Examples

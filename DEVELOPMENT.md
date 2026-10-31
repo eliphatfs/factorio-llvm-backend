@@ -100,11 +100,15 @@ sensor, and its wall reports that arrow signal. See `examples/joystick.c`. Gate 
 wall's circuit settings follow an in-game experiment but the exported
 blueprint is untested in game.
 
-Joystick reads are live, not latched: if the cage changes in the first tick
-or two of a block that computes from them, values in that block can mix old
-and new state (in the simulator, a move from S straight to N could put the
-position at 0). Copying `joystick[]` into a `volatile` array and computing
-from the copy (a later block) avoids it; the real fix is to latch input reads.
+Input reads are latched (`_snapshot_inputs` in cfg.py). The joystick and
+input-terminal nets are copied to a green snapshot net, held by a decider
+while S is inside any block that reads them ([base, jump-1]) and following
+the live value otherwise; every reader (direct reads and memory chunk copies)
+reads the snapshot. A block thus never mixes old and new state, adds no
+latency, and may see a value that changed during its own first tick only on
+the next read. `run()` steps `WARM_UP` ticks in reset so the snapshot is
+filled before the program starts; tests/test_io.py flips an input at every
+tick of a block to check it.
 
 A screen's memory chunks (395 lamps each) are placed in strips beside the
 screen, level with their lamps (`Memory._beside_screen`), so each chunk's loop

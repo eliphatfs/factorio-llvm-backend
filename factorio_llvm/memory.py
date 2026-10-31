@@ -295,6 +295,7 @@ class Memory:
                 self.b.nl.add(Pole(label="substation", position=(x + 1.0, y + 1.0), group="screen"))
 
     def build(self, inputs: Net | None, outputs: Net, screen_width: int | None = None) -> None:
+        self.input_copies: list[tuple[Arithmetic, _Bank]] = []
         """Place every chunk and its readers."""
         screen_x = 0
         joystick = None
@@ -394,6 +395,7 @@ class Memory:
             copy = Arithmetic(Sig(EACH, frozenset({RED})), "+", 0, EACH, label=f"{name} <- {bank.side}")
             self.b.place(copy, (), loop, group)
             inputs.attach(copy.inp)
+            self.input_copies.append((copy, bank))
             return
         if a.readonly:
             rom = {s: v for s, v in words if v}
