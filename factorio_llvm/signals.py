@@ -29,6 +29,12 @@ def signal_type(name: str) -> str:
         raise KeyError(f"unknown signal {name!r}") from None
 
 
+def rich_text(name: str) -> str:
+    """The in-game rich text tag that shows a signal's icon, e.g. ``[virtual-signal=signal-G]``."""
+    kind = signal_type(name)
+    return f"[{'virtual-signal' if kind == 'virtual' else kind}={name}]"
+
+
 def is_known(name: str) -> bool:
     return name in _catalog()
 

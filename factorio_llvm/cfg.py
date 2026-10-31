@@ -28,10 +28,10 @@ from dataclasses import dataclass, field
 
 from .frontend import Array, Block, Function, Op, Operand, Unsupported, Value
 from .lower import GATE, PRIVATE_CONSTANT, Lowered, Wire, _Builder, _colors, _depth, _Lowerer, _operand
+from .signals import EACH, rich_text
 from .netlist import GREEN, RED, Arithmetic, Cond, Connector, Constant, Decider, Message, Net, Netlist, Out, Panel, Sig
 from .memory import ADDRESS, Memory, Ptr
 from .schedule import GATE_TO_LATCH, BlockSchedule, Jump, Load, Register, Schedule, Store, Test, Write
-from .signals import EACH
 from .sim import Simulator, wrap
 
 STEP = "signal-S"
@@ -285,7 +285,7 @@ class _CfgLowerer(_Lowerer):
         params, param_signals = [], []
         for p in self.fn.params:
             s = self.b.signal()
-            params.append(self.b.place(Constant({}, label=f"argument %{p.name}"), (), RED, group="arguments"))
+            params.append(self.b.place(Constant({s: 0}, label=f"argument %{p.name} = {rich_text(s)}"), (), RED, group="arguments"))
             param_signals.append(s)
             self.env[id(p)] = Wire(s, 0, RED)
             self.names[p.name] = s
@@ -346,7 +346,7 @@ class _CfgLowerer(_Lowerer):
         # memory-mapped extern arrays (INPUT terminal only if something reads one).
         self.b.group = "io"
         output = self.b.nl.net(RED, "OUTPUT")
-        out_terminal = self.b.place(Constant({}, label="OUTPUT: wire the factory here"), (), output)
+        out_terminal = self.b.place(Constant({}, label=f"OUTPUT: wire the factory here. Result = {rich_text(result.signal)}, done = {rich_text(DONE)}"), (), output)
         self._tag(out_terminal.out, "OUTPUT", "signal-O")
         port = Decider(
             [self._ge(halt)],
