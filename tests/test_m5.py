@@ -45,11 +45,14 @@ def test_unrolled_stores_share_a_block(build):
     assert any(_ports(c, b.name) == [0, 1, 2, 3] for b in c.schedule.blocks)
 
 
-def test_stores_to_unknown_addresses_split(build):
+def test_stores_to_unknown_addresses_take_turns(build):
     ir, _ = build
     c = lower(read_function(ir, "scatter"))
     inv = [b for b in c.schedule.blocks if any(st.array == "inv" for st in b.stores)]
-    assert inv and all(len(b.stores) == 1 for b in inv)
+    # They share a block, one step apart (each may overwrite the one before).
+    for b in inv:
+        steps = sorted(st.step for st in b.stores if st.array == "inv")
+        assert steps == list(range(steps[0], steps[0] + len(steps)))
 
 
 def test_big_array_is_chunked(build):

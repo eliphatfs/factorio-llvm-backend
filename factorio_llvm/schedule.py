@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .fuse import Bool
 from .lower import Lowered, Wire
 
 GATE_TO_LATCH = 1  # ticks from a gate sampling a value to its register latching it
@@ -78,9 +79,13 @@ class Jump:
     delta: int
     target: str
     label: str = ""
+    when: Bool | None = None  # a branch condition folded into the jump's decider
 
     def __str__(self) -> str:
-        cond = f"if {' and '.join(map(str, self.tests))} " if self.tests else ""
+        parts = [str(t) for t in self.tests]
+        if self.when is not None:
+            parts.append(" or ".join(" and ".join(f"{a.a.signal} {a.cmp} {getattr(a.b, 'signal', a.b)}" for a in c) for c in self.when.clauses))
+        cond = f"if {' and '.join(parts)} " if parts else ""
         return f"@{self.step}  {cond}goto {self.target}  (S += {self.delta})"
 
 
@@ -109,6 +114,8 @@ class Store:
     clear: bool = False
     sources: tuple[str, str] = ("", "")
     port: int = 0  # bus write port
+    wave: int = 0  # steps after the block's first stores (see split_after_stores)
+    enable: Lowered | None = None  # E to send when guarded: array id (or -id) if the guard holds, else 0
 
 
     def __str__(self) -> str:

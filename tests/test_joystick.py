@@ -67,3 +67,20 @@ def test_arguments_are_tagged():
     c = lower(read_function(compile_c("int f(int a, int b) { return a * b + 1; }"), "f"))
     texts = {e.text for e in c.netlist.entities if isinstance(e, Panel)}
     assert {"argument %a", "argument %b"} <= texts
+
+
+def test_constant_index_inputs_read_the_wire():
+    ir = compile_c("extern volatile int in[2];\nint f(int i) { return in[1] * 2 + in[i]; }\n")
+    c = lower(read_function(ir, "f"))
+    ports = [n for n in c.netlist.logical if " port " in n.name]
+    assert len({n.name.split(" port ")[1].split()[0] for n in ports}) == 1  # only in[i]
+    by = {e.label: e for e in c.netlist.entities}
+    assert any(l.endswith("(direct)") for l in by)
+
+
+def test_ticks_counts_every_tick():
+    src = "#include <factorio.h>\nint f(int n) { int t = ticks(); while (ticks() - t < n); return ticks() - t; }\n"
+    c = lower(read_function(compile_c(src), "f"))
+    for n in (5, 40):
+        got = c.run(n)
+        assert n <= got <= n + 10  # the wait loop checks every few ticks

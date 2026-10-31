@@ -74,7 +74,8 @@ is a lamp screen instead: a grid of lamps above the circuit, each showing its
 word as a packed `0xRRGGBB` colour (`--screen-width` sets the row length, at
 most 16 rows).
 
-`#include <factorio.h>` (found automatically) declares these devices with
+`#include <factorio.h>` (found automatically) declares these devices (and `ticks()`, a
+free-running game-tick counter) with
 docs and helpers: define `SCREEN_W`/`SCREEN_H` first for `screen[]` (its width
 also sets the lamp layout), plus `RGB()` and colour names. `joystick[8]` is an
 8-direction joystick (`JOY_N` .. `JOY_NW`, or `joy_dx()`/`joy_dy()`): a cage

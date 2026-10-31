@@ -21,15 +21,17 @@ arrays use their I/O signals, so they are one chunk. Each chunk has:
 A read-only array (a constant global) is a ROM: one constant combinator per
 chunk with the non-zero words, as its loop.
 
-Write. A store pulses the bus at its block's gate step: address + 1 as ``A``
-(two pulses, the address and a 1), value as ``V``, array id as ``E``. The
-``k``-th store of a block uses write port ``k``: port 0 is ``A``/``V``/``E``,
-later ports get bus signals of their own, and each chunk the port writes has
-its own mask, delayed value and writer (with several ports, a second copy of
-each mask feeds the cell). The word is on the loop three ticks later, before
-the next block can read it. ``frontend.split_after_stores`` ends a block
-before a load of an array it wrote, and before a store that may hit a word it
-wrote: two stores share a block only if their addresses differ by a constant.
+Write. A store pulses the bus for one step: address + 1 as ``A`` (two
+pulses, the address and a 1), value as ``V``, array id as ``E`` (0 for a
+guarded store whose guard fails: nothing is written). A block's stores go out
+in *waves* ending at its gate step, one step apart; a store that may hit a
+word an earlier one wrote is in a later wave (``frontend.split_after_stores``),
+and stores one step apart to one word leave the later value. The ``k``-th
+store of a wave uses write port ``k``: port 0 is ``A``/``V``/``E``, later ports
+get bus signals of their own, and each chunk the port writes has its own mask,
+delayed value and writer (with several ports, a second copy of each mask
+feeds the cell). The word is on the loop three ticks after its wave, before
+the next block can read it; a block ends before a load of an array it wrote.
 
 Read port. Port ``j`` of an array has an address net (red for even ports,
 green for odd ones) (``A`` = address + 1) and
@@ -96,7 +98,11 @@ class _Bank:
 
     @property
     def is_input(self) -> bool:
-        return self.array.external and not self.stored and not self.is_joystick
+        return self.array.external and not self.stored and not self.is_joystick and not self.is_clock
+
+    @property
+    def is_clock(self) -> bool:
+        return self.array.external and not self.stored and self.array.name == "factorio_clock"
 
     @property
     def is_joystick(self) -> bool:
@@ -111,6 +117,8 @@ class _Bank:
         """Which net its I/O signals are on."""
         if self.is_joystick:
             return "joystick"
+        if self.is_clock:
+            return "clock"
         return "INPUT" if self.is_input else f"screen {self.array.name}" if self.is_screen else "OUTPUT"
 
 
@@ -165,6 +173,8 @@ class Memory:
                 continue
             side = bank.side
             used.setdefault(side, set())
+            if bank.is_clock and a.size != 1:
+                raise Unsupported("@factorio_clock must have 1 word")
             if bank.is_joystick and a.size != len(JOYSTICK):
                 raise Unsupported(f"@joystick must have {len(JOYSTICK)} words (one per direction), not {a.size}")
             if a.name in chosen:
@@ -172,7 +182,7 @@ class Memory:
                 if len(sigs) != a.size:
                     raise Unsupported(f"--io {a.name}: {len(sigs)} signals for {a.size} words")
             else:
-                pool = JOYSTICK if bank.is_joystick else _IO_ORDER
+                pool = JOYSTICK if bank.is_joystick else [CLOCK] if bank.is_clock else _IO_ORDER
                 sigs = [s for s in pool if s not in used[side]][: a.size]
                 if len(sigs) < a.size:
                     raise Unsupported(f"@{a.name} has more words than there are signals")
@@ -204,7 +214,9 @@ class Memory:
         screen_x = 0
         joystick = None
         if any(b.is_joystick for b in self.banks.values()):
-            joystick = self._joystick()
+            joystick = self.joystick = self._joystick()
+        if any(b.is_clock for b in self.banks.values()):
+            self.clock = self._clock()
         for bank in self.banks.values():
             a = bank.array
             group = f"array {a.name}"
@@ -213,7 +225,8 @@ class Memory:
                 words = list(zip(sigs, a.init[base : base + CHUNK]))
                 loop = self.b.nl.net(GREEN, f"{a.name}[{base}..]")
                 bank.loops.append(loop)
-                self._chunk(bank, base, words, loop, joystick if bank.is_joystick else inputs, outputs, group)
+                source = joystick if bank.is_joystick else self.clock if bank.is_clock else inputs
+                self._chunk(bank, base, words, loop, source, outputs, group)
                 if bank.is_screen:
                     screen_x = self._screen(bank, loop, screen_width, screen_x)
             # Readers port by port, each with its own copy of the chunk's key,
@@ -223,6 +236,16 @@ class Memory:
                     words = list(zip(sigs, a.init[base : base + CHUNK]))
                     key_net = self._key(a, base, words, group, GREEN if port.address.color == RED else RED)
                     self._reader(bank, base, j, port, key_net, bank.loops[c], group)
+
+    def _clock(self) -> Net:
+        """A counter that adds 1 every tick from the moment it is built; return its net."""
+        net = self.b.nl.net(RED, "clock")
+        one = Constant({CLOCK: 1}, label="clock: +1 a tick")
+        net.attach(self.b.place(one, (), None, "clock").out)
+        count = Arithmetic(Sig(CLOCK, frozenset({RED})), "+", 0, CLOCK, label="clock (ticks)")
+        self.b.place(count, (), net, "clock")
+        net.attach(count.inp)
+        return net
 
     def _joystick(self) -> Net:
         """Place the joystick left of the screen; return the net its walls report on.
@@ -275,7 +298,7 @@ class Memory:
         a = bank.array
         name = f"{a.name}[{base}..]"
         s_red = Sig(self.step, frozenset({RED}))
-        if bank.is_input or bank.is_joystick:
+        if bank.is_input or bank.is_joystick or bank.is_clock:
             assert inputs is not None
             copy = Arithmetic(Sig(EACH, frozenset({RED})), "+", 0, EACH, label=f"{name} <- {bank.side}")
             self.b.place(copy, (), loop, group)
@@ -351,6 +374,7 @@ MAX_SCREEN_ROWS = 16
 JOYSTICK = ("up-arrow", "up-right-arrow", "right-arrow", "down-right-arrow", "down-arrow", "down-left-arrow", "left-arrow", "up-left-arrow")
 _JOYSTICK_STEPS = ((0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1))
 JOYSTICK_EXIT = "signal-X"
+CLOCK = "signal-T"  # extern volatile int factorio_clock[1] (see include/factorio.h)
 JOYSTICK_REACH = 7  # tiles from the player to the N/E/S/W sensor gates (from an in-game test)
 JOYSTICK_DIAGONAL_REACH = 5  # tiles along each axis to the diagonal ones (7 was too far)
 JOYSTICK_CENTRE = (-JOYSTICK_REACH - 4, -JOYSTICK_REACH - 4)  # the player's tile, left of and above the screen  # two rows of substations power at most this many

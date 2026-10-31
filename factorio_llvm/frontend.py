@@ -60,6 +60,8 @@ class Op:
     result: Value
     predicate: str | None = None  # icmp only
     text: str = ""
+    guard: "Operand | None" = None  # store/clear: an i1; writes only when it is 1 (if-conversion)
+    wave: int = 0  # store/clear: goes out this many steps after the block's first stores
 
 
 @dataclass
@@ -335,7 +337,9 @@ def read_function(ir_text: str, name: str | None = None) -> Function:
     used = {id(a): a for a in [*arrays.values(), *globals_.values()]}
     out.arrays = [a for a in used.values() if _mentions(out, a)]
     _point_to_arrays(out)
-    return split_after_stores(out)
+    from .ifconv import simplify_cfg
+
+    return split_after_stores(simplify_cfg(out))
 
 
 def _gep_args(text: str, ops: list[Operand]) -> list[Operand]:
@@ -420,14 +424,13 @@ def _affine(v: Operand, defs: dict[int, Op], depth: int = 0) -> _Affine:
 
 
 def split_after_stores(fn: Function) -> Function:
-    """Split blocks where a memory op must see an earlier store or clear.
+    """Split blocks where a load must see an earlier store or clear; order the rest.
 
-    A block's stores all go out at its gate step, each on its own write port,
-    and arrays change only after the block. So a new block starts before a
-    load or clear of an array the block already wrote, and before a store that
-    may hit a word the block already wrote or cleared. Two stores to one
-    array share a block only if their addresses differ by a constant (``i``
-    and ``i + 1``, as unrolled loops produce).
+    Arrays change only after a block, so a new block starts before a load of
+    an array the block already wrote or cleared. Stores and clears that may
+    hit a word an earlier one of the block wrote go out a step later (a later
+    *wave*); two stores to one array share a wave only if their addresses
+    differ by a constant (``i`` and ``i + 1``, as unrolled loops produce).
 
     The block keeps its name for the part that runs first (branches go there);
     successors' phis are told about the part that now ends with the terminator.
@@ -439,17 +442,23 @@ def split_after_stores(fn: Function) -> Function:
     for b in fn.blocks:
         piece = Block(b.name, b.phis)
         n = 0
-        written: list[tuple[Array | None, _Affine | None]] = []  # this piece's stores (None: clear)
+        written: list[tuple[Array | None, _Affine | None, int]] = []  # this piece's stores (None: clear), wave
+
+        def mine(op: Op) -> list[tuple[Array | None, _Affine | None, int]]:
+            arr = _array_of(op)
+            return [w for w in written if arr is None or w[0] is None or w[0] is arr]
 
         def must_split(op: Op) -> bool:
-            if op.opcode not in ("load", "store", "clear"):
-                return False
-            arr = _array_of(op)
-            mine = [w for w in written if arr is None or w[0] is None or w[0] is arr]
-            if op.opcode == "load" or op.opcode == "clear":
-                return bool(mine)
-            addr = _affine(op.args[1], defs)
-            return any(w[1] is None or w[1][0] != addr[0] or w[1][1] == addr[1] for w in mine)
+            return op.opcode == "load" and bool(mine(op))
+
+        def wave(op: Op) -> int:
+            """One step after every earlier store of this piece it may overwrite."""
+            if op.opcode == "clear":
+                clash = mine(op)
+            else:
+                addr = _affine(op.args[1], defs)
+                clash = [w for w in mine(op) if w[1] is None or w[1][0] != addr[0] or w[1][1] == addr[1]]
+            return max((w[2] + 1 for w in clash), default=0)
 
         for op in b.ops:
             if must_split(op):
@@ -463,10 +472,9 @@ def split_after_stores(fn: Function) -> Function:
                 blocks.append(piece)
                 piece, written = nxt, []
             piece.ops.append(op)
-            if op.opcode == "store":
-                written.append((_array_of(op), _affine(op.args[1], defs)))
-            elif op.opcode == "clear":
-                written.append((_array_of(op), None))
+            if op.opcode in ("store", "clear"):
+                op.wave = wave(op)
+                written.append((_array_of(op), _affine(op.args[1], defs) if op.opcode == "store" else None, op.wave))
         piece.term = b.term
         blocks.append(piece)
         if piece.name != b.name:
