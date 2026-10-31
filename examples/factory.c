@@ -260,7 +260,9 @@ int game(int frames) {
             int tx = t & (TW - 1), ty = t / TW;
             int sx = tx - ddx, sy = ty - ddy, fx = tx + ddx, fy = ty + ddy;
             if (!item[t]) {
-                if (sx >= 0 && sx < TW && sy >= 0 && sy < TH - 1) {
+                /* grab every third frame: plates 3 tiles apart read clearly as
+                   moving forward (2 apart, a step forward looks like a step back) */
+                if (frame % 3 == 0 && sx >= 0 && sx < TW && sy >= 0 && sy < TH - 1) {
                     int s = sy * TW + sx, k = kind[s];
                     if (k == CHEST) {
                         item[t] = 1;
