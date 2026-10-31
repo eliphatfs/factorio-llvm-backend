@@ -35,7 +35,7 @@ COMBINATOR_REACH = 9.0
 SUBSTATION_REACH = 18.0
 _SUB_LO = CELL // 2 - 1
 # Top-left tiles of the 2x2 substation sites in a cell; the first one powers it.
-SITES = ((_SUB_LO, _SUB_LO), (2, 4), (8, 6), (4, 0), (6, 10))
+SITES = ((_SUB_LO, _SUB_LO), (2, 4), (8, 6), (4, 0), (6, 10), (0, 8), (10, 2))
 
 
 def _cell_slots() -> list[tuple[int, int]]:
