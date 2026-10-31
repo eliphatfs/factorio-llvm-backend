@@ -243,9 +243,11 @@ class Memory:
             e.position = (cx + dx + 0.5, cy + dy + 0.5)
             self.b.place(e, (), net if wired else None, "screen")
 
-        # A wall above and two on each side; the door below. Two tall, so the
-        # player only drifts up and down a little (2x2 is too small to enter).
-        for dx, dy in ((0, -1), (-1, 0), (1, 0), (-1, 1)):
+        # A solid 3x2 block: walls, with the door gate at the bottom middle. The
+        # player squeezes in between the top wall and the door (wall collision
+        # boxes are smaller than a tile; 2x2 is too small to enter), which
+        # leaves only a little drift along one axis.
+        for dx, dy in ((0, 0), (-1, 0), (1, 0), (-1, 1)):
             put(Wall(Cond(x, "<", 0), label="joystick cage"), dx, dy)
         put(Gate(vertical=False, label="joystick door"), 0, 1)
         put(Wall(Cond(x, ">", 0), label="joystick door control"), 1, 1, wired=True)
