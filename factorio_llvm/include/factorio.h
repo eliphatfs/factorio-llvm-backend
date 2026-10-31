@@ -21,7 +21,13 @@
  *   lamps, row-major, top-left first. Write a packed colour from RGB(); 0 is
  *   off. At most 16 rows. Writes show up a few ticks after the store.
  *
- * Both are read and written like normal arrays (screen[y * SCREEN_W + x] = c).
+ * Clock
+ *   ticks() is a counter that adds 1 every game tick (60 a second), from the
+ *   moment the blueprint is built; it keeps counting through reset and halt.
+ *   Reading it costs one tick, so ticks() - ticks() style timing is exact to
+ *   the tick. Wraps after about 414 days.
+ *
+ * Joystick and screen are read and written like normal arrays (screen[y * SCREEN_W + x] = c).
  * volatile keeps the optimiser from caching joystick reads in a loop.
  */
 #ifndef FACTORIO_H
@@ -38,6 +44,11 @@ static inline int joy_dx(void) {
 static inline int joy_dy(void) {
     return ((joystick[JOY_S] | joystick[JOY_SE] | joystick[JOY_SW]) != 0) - ((joystick[JOY_N] | joystick[JOY_NE] | joystick[JOY_NW]) != 0);
 }
+
+extern volatile int factorio_clock[1];
+
+/* Game ticks since the circuit was built. */
+static inline int ticks(void) { return factorio_clock[0]; }
 
 /* A lamp colour from 0..255 channels. */
 #define RGB(r, g, b) ((int)(((r) & 255) << 16 | ((g) & 255) << 8 | ((b) & 255)))

@@ -407,7 +407,7 @@ class _CfgLowerer(_Lowerer):
             for copy, arr, i in self.direct_reads:
                 bank = self.mem.bank(arr)
                 copy.left = Sig(bank.io[i], frozenset({RED}))
-                (self.mem.joystick if bank.is_joystick else inputs).attach(copy.inp)
+                (self.mem.joystick if bank.is_joystick else self.mem.clock if bank.is_clock else inputs).attach(copy.inp)
         unknown = set(self.io_choice) - set(io)
         if unknown:
             raise Unsupported(f"--io names no extern array: {sorted(unknown)}")

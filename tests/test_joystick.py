@@ -76,3 +76,11 @@ def test_constant_index_inputs_read_the_wire():
     assert len({n.name.split(" port ")[1].split()[0] for n in ports}) == 1  # only in[i]
     by = {e.label: e for e in c.netlist.entities}
     assert any(l.endswith("(direct)") for l in by)
+
+
+def test_ticks_counts_every_tick():
+    src = "#include <factorio.h>\nint f(int n) { int t = ticks(); while (ticks() - t < n); return ticks() - t; }\n"
+    c = lower(read_function(compile_c(src), "f"))
+    for n in (5, 40):
+        got = c.run(n)
+        assert n <= got <= n + 10  # the wait loop checks every few ticks

@@ -70,7 +70,9 @@ def main(argv: list[str] | None = None) -> int:
     if stepped:
         print(f"  OUTPUT terminal: {compiled.result} = result and signal-check = 1 once halted", file=sys.stderr)
         for name, sigs in compiled.io.items():
-            if name == "joystick" and _reads_only(compiled, name):
+            if name == "factorio_clock":
+                side = "tick counter"
+            elif name == "joystick" and _reads_only(compiled, name):
                 side = "joystick cage"
             elif name.startswith("screen") and not _reads_only(compiled, name):
                 side = "lamp screen (packed RGB)"
