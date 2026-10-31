@@ -25,18 +25,24 @@ llvmlite bundles its own LLVM and parses the IR clang writes. An LLVM parser
 reads IR from the same or an older LLVM, but often not from a newer one, so
 **llvmlite's LLVM must be at least as new as your clang**.
 
-| llvmlite | bundled LLVM | works here |
+| llvmlite | bundled LLVM | clang it can read |
 | --- | --- | --- |
-| 0.42, 0.43 | 14 | no (no wheels for Python 3.13; the IR needs opaque pointers) |
-| 0.44 | 15 | no |
-| 0.45 – 0.47 | 20 | no (the frontend relies on newer llvmlite APIs) |
-| 0.48 – 0.50 | 22 | yes |
+| 0.42 – 0.43 | 14 | too old (the IR needs opaque pointers, clang 15+) |
+| 0.44 | 15 | clang 15 |
+| 0.45 – 0.47 | 20 | clang 15 – 20 |
+| 0.48 – 0.50 | 22 | clang 15 – 22 |
 
-So use **llvmlite 0.48 or newer** (the package requires it) with **clang 15
-through 22**. Clang 15 is the first to emit opaque `ptr` types by default,
-which the frontend expects. The recommended setup, and the one the tests are
-run with, is **clang 18** (Ubuntu 24.04's `clang` package) with llvmlite
-0.50. Check yours with:
+The package requires llvmlite 0.45 or newer. Pick the llvmlite whose LLVM is
+at least your clang's major version; with too old an llvmlite, parsing fails
+with an `LLVM IR parsing error` such as `unterminated attribute group`.
+Clang 15 is the lower bound because it is the first to emit opaque `ptr`
+types by default, which the frontend expects.
+
+**Recommended:** clang 18 (Ubuntu 24.04's `clang`) or clang 20, with the
+newest llvmlite (0.50). The test suite passes with clang 18 on llvmlite 0.45
+through 0.50, and with clang 20 on 0.47.
+
+Check yours with:
 
 ```
 clang --version
