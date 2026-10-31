@@ -1,16 +1,21 @@
 /* A tiny factory game on a 256x192 lamp screen (32x24 tiles of 8x8 pixels).
 
    An endless chest of iron plates, an inserter that lifts plates out of it
-   onto a belt, and a little engineer you walk around with the joystick.
+   onto a belt, and a little engineer you steer from two input terminals.
 
-   Controls (joystick only):
-   - Walk with the 8 directions. The engineer moves one tile per frame.
-   - The bottom row is the toolbar: hand, belt, inserter, eraser. Walk onto a
-     slot to pick that tool (the picked slot has a white frame).
-   - With the belt or inserter tool, every tile you walk off gets one, facing
-     the way you walked. Walking over an existing one again re-aims it, so
-     that is how you rotate. The eraser removes belts and inserters. The hand
-     just walks. The chest can't be overwritten.
+   Controls: two constant combinators, INPUT @walk and INPUT @hold, each
+   holding one signal that stays set (so no input is missed however slow a
+   frame is). Set them by pasting a blueprint of a constant combinator onto
+   them, which works from remote view too; examples/factory_buttons.txt is a
+   blueprint book with one page per setting.
+   - walk: 0 stop, 1 up, 2 right, 3 down, 4 left. The engineer moves one tile
+     per frame while it is set.
+   - hold: 0 nothing, 1 belt, 2 inserter, 3 eraser. The bottom row shows
+     which (white frame).
+   - Holding a belt or inserter, every tile you walk off gets one, facing the
+     way you walked. Walking over an existing one again re-aims it, so that is
+     how you rotate. The eraser removes belts and inserters. The chest can't
+     be overwritten.
 
    Rules: an inserter takes from the tile behind it (the chest, or a plate on
    a belt) and drops onto the tile in front (an empty belt, or a chest, which
@@ -18,7 +23,8 @@
    next belt is free. Plates reaching a chest are counted; game() returns
    that count after `frames` frames.
 
-   python -m factorio_llvm examples/factory.c -f game --args 1000000 --no-copy */
+   python -m factorio_llvm examples/factory.c -f game --args 1000000000 --no-sim \
+       --io walk=signal-W --io hold=signal-H */
 #ifndef TW
 #define TW 32           /* tiles per row (a power of two) */
 #define TH 24           /* tile rows; the last one is the toolbar */
@@ -36,10 +42,23 @@
 
 enum { EMPTY, CHEST, BELT, INSERTER };
 enum { T_HAND, T_BELT, T_INSERTER, T_ERASER };
-enum { S_GROUND, S_CHEST, S_BELT, S_INSERTER, S_ENGINEER, S_PLATE, S_HAND, S_ERASER };
+enum { S_GROUND, S_CHEST, S_BELT, S_INSERTER, S_ENGINEER, S_PLATE, S_HAND, S_ERASER, S_BLANK };
+/* Toolbar tiles get kinds of their own: K_TOOL + tool, and K_OFF past the icons. */
+enum { K_TOOL = 4, K_OFF = 8 };
 
-/* generated sprite ROM: 0=ground, 1=chest, 2=belt, 3=inserter, 4=engineer, 5=plate, 6=hand, 7=eraser */
-static const int sprites[512] = {
+/* What to draw for each kind, and over it (index kind * 2 + item). */
+static const int base_sprite[9] = {S_GROUND, S_CHEST, S_BELT, S_INSERTER, S_ENGINEER, S_BELT, S_INSERTER, S_ERASER, S_BLANK};
+static const int over_sprite[18] = {
+    S_BLANK, S_BLANK, S_BLANK, S_BLANK, S_BLANK, S_PLATE, S_BLANK, S_HAND,
+    S_BLANK, S_BLANK, S_BLANK, S_BLANK, S_BLANK, S_BLANK, S_BLANK, S_BLANK, S_BLANK, S_BLANK};
+/* Rotations: source pixel = rot0 + rotx * x + roty * y, facing east, south, west, north. */
+static const int rot0[4] = {0, 56, 63, 7};
+static const int rotx[4] = {1, -8, -1, 8};
+static const int roty[4] = {8, 1, -8, -1};
+
+/* sprite ROM (from a small art script): 0=ground, 1=chest, 2=belt, 3=inserter, 4=engineer, 5=plate, 6=hand,
+   7=eraser, 8=blank (all 0: black, or see-through as an overlay) */
+static const int sprites[576] = {
     0x2a3a22, 0x2a3a22, 0x2a3a22, 0x2a3a22, 0x2a3a22, 0x2a3a22, 0x2a3a22, 0x2a3a22,
     0x2a3a22, 0x2a3a22, 0x2a3a22, 0x2a3a22, 0x324428, 0x2a3a22, 0x2a3a22, 0x2a3a22,
     0x2a3a22, 0x2a3a22, 0x2a3a22, 0x2a3a22, 0x2a3a22, 0x2a3a22, 0x2a3a22, 0x2a3a22,
@@ -116,19 +135,24 @@ int lists[2 * MAXE]; /* belts, then inserters */
 int count[2];        /* how many belts, inserters */
 int dirty[NT];
 int ndirty, frame;
-volatile int joy[8]; /* this frame's joystick, copied once (see read_joystick) */
+extern volatile int walk[1], hold[1]; /* the two input terminals */
+volatile int input[2]; /* this frame's inputs, copied once (see read_input) */
 
-/* The joystick can change in the middle of a block, and a block that computes
+/* An input can change in the middle of a block, and a block that computes
    from it directly could then see half the old and half the new state.
    Copying it to memory first and computing from the copy (a later block,
    since a load after a store to the same array starts one) keeps every frame
    consistent. */
-static inline void read_joystick(int *dx, int *dy) {
-    for (int k = 0; k < 8; k++) joy[k] = joystick[k];
-    *dx = ((joy[JOY_E] | joy[JOY_NE] | joy[JOY_SE]) != 0) - ((joy[JOY_W] | joy[JOY_NW] | joy[JOY_SW]) != 0);
-    *dy = ((joy[JOY_S] | joy[JOY_SE] | joy[JOY_SW]) != 0) - ((joy[JOY_N] | joy[JOY_NE] | joy[JOY_NW]) != 0);
+#ifndef HOST_POLL
+#define HOST_POLL() /* a native test harness can step its inputs here */
+#endif
+static inline void read_input(int *w, int *h) {
+    HOST_POLL();
+    input[0] = walk[0];
+    input[1] = hold[0];
+    *w = input[0];
+    *h = input[1];
 }
-
 static inline int step_x(int d) { return (d == 0) - (d == 2); }
 static inline int step_y(int d) { return (d == 1) - (d == 3); }
 
@@ -171,50 +195,30 @@ static inline void build(int t, int k, int d) {
     mark(t);
 }
 
-/* Redraw one 8x8 tile: ground or a building, a plate, the engineer, and the
+/* Redraw one pixel row of a queued 8x8 tile: ground or a building, a plate, the engineer, and the
    toolbar frame. Directional sprites are drawn facing east and rotated. */
-static inline void draw(int t, int ex, int ey, int tool) {
+static inline void draw_row(int r, int ex, int ey, int tool) {
+    int t = dirty[r >> 3], y = r & 7;
     int tx = t & (TW - 1), ty = t / TW;
-    int base, over, d;
-    if (ty == TH - 1) {
-        /* toolbar: the four tool icons, then black */
-        base = tx == T_HAND ? S_ENGINEER : tx == T_BELT ? S_BELT : tx == T_INSERTER ? S_INSERTER : S_ERASER;
-        over = -1;
-        d = 0;
-    } else {
-        int k = kind[t];
-        base = k == CHEST ? S_CHEST : k == BELT ? S_BELT : k == INSERTER ? S_INSERTER : S_GROUND;
-        over = item[t] ? (k == BELT ? S_PLATE : S_HAND) : -1;
-        d = dir[t];
-    }
-    int icon = ty == TH - 1 && tx < 4;
-    int framed = icon && tx == tool;
-    int hero = tx == ex && ty == ey;
-    /* source pixel = c0 + cx * x + cy * y for each rotation */
-    int c0 = d == 0 ? 0 : d == 1 ? 56 : d == 2 ? 63 : 7;
-    int cx = d == 0 ? 1 : d == 1 ? -8 : d == 2 ? -1 : 8;
-    int cy = d == 0 ? 8 : d == 1 ? 1 : d == 2 ? -8 : -1;
-    int b0 = base * 64 + c0, o0 = over * 64 + c0;
-    int pix = ty * 8 * SCREEN_W + tx * 8;
-    for (int y = 0; y < 8; y++) {
-        int row = pix + y * SCREEN_W;
-        int edge = framed & (y == 0 | y == 7);
+    int k = kind[t], d = dir[t], it = item[t];
+    /* Table lookups rather than if/else chains, so this is one block and
+       the loop over all rows of all redrawn tiles pipelines. */
+    int b0 = base_sprite[k] * 64 + rot0[d], o0 = over_sprite[k * 2 + it] * 64 + rot0[d];
+    int cx = rotx[d], cy = roty[d];
+    int e0 = (tx == ex && ty == ey ? S_ENGINEER : S_BLANK) * 64;
+    int framed = k == K_TOOL + tool;
+    int edge = framed & (y == 0 | y == 7);
+    int row = (ty * 8 + y) * SCREEN_W + tx * 8;
 #pragma unroll
-        for (int x = 0; x < 8; x++) {
-            int s = cx * x + cy * y;
-            int c = sprites[b0 + s];
-            if (!icon && ty == TH - 1) c = BLACK;
-            if (over >= 0) {
-                int o = sprites[o0 + s];
-                if (o) c = o;
-            }
-            if (hero) {
-                int e = sprites[S_ENGINEER * 64 + y * 8 + x];
-                if (e) c = e;
-            }
-            if (edge | (framed & (x == 0 | x == 7))) c = WHITE;
-            screen[row + x] = c;
-        }
+    for (int x = 0; x < 8; x++) {
+        int s = cx * x + cy * y;
+        int c = sprites[b0 + s];
+        int o = sprites[o0 + s];
+        int e = sprites[e0 + y * 8 + x];
+        c = o ? o : c;
+        c = e ? e : c;
+        c = edge | (framed & (x == 0 | x == 7)) ? WHITE : c;
+        screen[row + x] = c;
     }
 }
 
@@ -224,6 +228,7 @@ int game(int frames) {
 
     frame = 1;  /* the setup's redraws go out with the first frame's */
     /* the starting factory: chest -> inserter -> belt running east */
+    for (int x = 0; x < TW; x++) kind[(TH - 1) * TW + x] = x < 4 ? K_TOOL + x : K_OFF;
     kind[SY * TW + 1] = CHEST;
     build(SY * TW + 2, INSERTER, 0);
     for (int x = 3; x < BELT_END; x++) build(SY * TW + x, BELT, 0);
@@ -232,25 +237,25 @@ int game(int frames) {
 
     for (; frame <= frames; frame++) {
         /* 1. the engineer */
-        int dx, dy;
-        read_joystick(&dx, &dy);
+        int w, h;
+        read_input(&w, &h);
+        if (h != tool && h >= T_HAND && h <= T_ERASER) {
+            mark((TH - 1) * TW + tool);
+            tool = h;
+            mark((TH - 1) * TW + tool);
+        }
+        int dx = (w == 2) - (w == 4), dy = (w == 3) - (w == 1);
         int nx = ex + dx, ny = ey + dy;
         nx = nx < 0 ? 0 : nx >= TW ? TW - 1 : nx;
-        ny = ny < 0 ? 0 : ny >= TH ? TH - 1 : ny;
+        ny = ny < 0 ? 0 : ny >= TH - 1 ? TH - 2 : ny;
         if (nx != ex || ny != ey) {
             int t = ey * TW + ex;
-            int d = dx > 0 ? 0 : dx < 0 ? 2 : dy > 0 ? 1 : 3;
-            if (ey < TH - 1 && tool != T_HAND)
-                build(t, tool == T_BELT ? BELT : tool == T_INSERTER ? INSERTER : EMPTY, d);
+            if (tool != T_HAND)
+                build(t, tool == T_BELT ? BELT : tool == T_INSERTER ? INSERTER : EMPTY, w == 2 ? 0 : w == 3 ? 1 : w == 4 ? 2 : 3);
             mark(t);
             mark(ny * TW + nx);
             ex = nx;
             ey = ny;
-            if (ey == TH - 1 && ex < 4 && ex != tool) {
-                mark((TH - 1) * TW + tool);
-                tool = ex;
-                mark((TH - 1) * TW + tool);
-            }
         }
 
         /* 2. inserters: grab from behind, drop in front */
@@ -314,7 +319,7 @@ int game(int frames) {
         }
 
         /* 4. redraw what changed */
-        for (int i = 0; i < ndirty; i++) draw(dirty[i], ex, ey, tool);
+        for (int r = 0; r < ndirty * 8; r++) draw_row(r, ex, ey, tool);
         ndirty = 0;
     }
     return delivered;

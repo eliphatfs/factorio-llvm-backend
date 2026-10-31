@@ -108,6 +108,10 @@ Start with `#include <factorio.h>` (found automatically). It declares:
   wire (declare it `volatile` so clang re-reads it). One it writes is an
   output, every word shown on the OUTPUT terminal. Pick the signals with
   `--io`, e.g. `--io in=iron-plate,copper-plate`. See `examples/m4.c`.
+  With several input arrays, each gets its own terminal (a constant
+  combinator described `INPUT @name` with its signals in order), all next to
+  one INPUT panel, so each can be set separately, e.g. by pasting a blueprint
+  of a constant combinator onto it, which also works from remote view.
 - **Screen.** Define `SCREEN_W` and `SCREEN_H` before the include to get
   `screen[]`: a grid of lamps above the circuit, each word a packed `0xRRGGBB`
   colour (`RGB()` and colour names are provided). Any size works; large
@@ -120,7 +124,7 @@ Start with `#include <factorio.h>` (found automatically). It declares:
   `examples/joystick.c`. The joystick layout has not yet been tested in game.
   If the joystick changes while a block is computing from it, the result can
   mix old and new state; copy `joystick[]` into a `volatile` array first and
-  compute from the copy, as `examples/factory.c` does.
+  compute from the copy (`examples/factory.c` does this with its inputs).
 - **`ticks()`**, a free-running game-tick counter.
 
 ### Examples
@@ -131,16 +135,18 @@ python -m factorio_llvm examples/m2.c -f gcd --args 84 36
 python -m factorio_llvm examples/m4.c -f draw --args 3
 python -m factorio_llvm examples/joystick.c
 python -m factorio_llvm examples/allsignals.c   # one lamp per signal, to check signals in game
-python -m factorio_llvm examples/factory.c -f game --args 1000000000 --no-sim
+python -m factorio_llvm examples/factory.c -f game --args 1000000000 --no-sim --io walk=signal-W --io hold=signal-H
 ```
 
 `examples/factory.c` is a small factory game on a 256x192 screen (32x24
-tiles): a chest of plates, an inserter, belts, and an engineer you walk with
-the joystick, placing belts and inserters from a toolbar on the bottom row.
-It is about 6,200 combinators plus the lamps and exports in about 1.5
-minutes. Drawing a tile costs about 70 ticks, so the first full screen takes
-about 54,000 ticks (15 minutes) and a frame then takes about 500 to 900
-ticks.
+tiles): a chest of plates, an inserter, belts, and an engineer who walks
+and places belts and inserters. Two input terminals steer it, `walk` (0 stop,
+1 up, 2 right, 3 down, 4 left) and `hold` (0 nothing, 1 belt, 2 inserter,
+3 eraser); `examples/factory_buttons.txt` is a blueprint book with a page
+per setting to paste onto them. Redrawing a tile costs 24 ticks (all rows of
+all changed tiles run as one pipelined loop), so the first full screen takes
+about 19,000 ticks (5 minutes) and a frame then takes about 300 to 450 ticks
+on a 64x48 build. It exports in about 1.5 minutes.
 
 ## Credits
 

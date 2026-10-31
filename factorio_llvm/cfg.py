@@ -58,7 +58,8 @@ class SteppedCompiled:
     schedule: Schedule
     output: Connector  # the OUTPUT terminal: result and signal-check = 1 once halted, plus output arrays
     status: Panel  # display panel: "reset", "running" or "done"
-    inputs: Constant | None = None  # the INPUT terminal, if the program reads extern arrays
+    inputs: Constant | None = None  # the (first) INPUT terminal, if the program reads extern arrays
+    input_terminals: dict[str, Constant] = field(default_factory=dict)  # input array -> its terminal
     io: dict[str, list[str]] = field(default_factory=dict)  # extern array -> signal per word
     last_ticks: int = 0
 
@@ -92,6 +93,7 @@ class _CfgLowerer(_Lowerer):
         self.writes = self.b.nl.net(GREEN, "register writes")
         self.registers: list[Register] = []
         self.mem = Memory(self.b, self.step, fn.arrays) if fn.arrays else None
+        self.input_terminals: dict[str, Constant] = {}
         self.written = {a.name for b in fn.blocks for o in b.ops if o.opcode in ("store", "clear") for a in [_array_of(o)] if a}
         self.direct_reads: list[tuple[Arithmetic, Array, int]] = []
         self.loads: list[Load] = []  # the current block's, while lowering it
@@ -462,10 +464,20 @@ class _CfgLowerer(_Lowerer):
                 # Every input word starts at 0 here: set it in the terminal, or
                 # wire the factory to it.
                 inputs = self.b.nl.net(RED, "INPUT")
-                zeros = {sig: 0 for b in ins for sig in b.io}
-                label = "INPUT: wire the factory here, or set values here.\n" + _io_lines(ins)
-                in_terminal = self.b.place(Constant(zeros, label=label), (), inputs)
-                self._tag(in_terminal.out, "INPUT", "signal-I")
+                # One terminal for one input array; with several, one each (all
+                # on the INPUT net), so each can be set on its own, e.g. by
+                # pasting a blueprint of a constant combinator onto it.
+                groups = [ins] if len(ins) == 1 else [[b] for b in ins]
+                for g in groups:
+                    zeros = {sig: 0 for b in g for sig in b.io}
+                    name = "INPUT" if len(groups) == 1 else f"INPUT @{g[0].array.name}"
+                    label = f"{name}: wire the factory here, or set values here.\n" + _io_lines(g)
+                    terminal = self.b.place(Constant(zeros, label=label), (), inputs)
+                    if in_terminal is None:  # one panel marks the input area
+                        self._tag(terminal.out, "INPUT", "signal-I")
+                    in_terminal = in_terminal or terminal
+                    for b in g:
+                        self.input_terminals[b.array.name] = terminal
             outs = [b for b in banks if b.array.external and b.side == "OUTPUT"]
             if outs:
                 out_terminal.label += "\n" + _io_lines(outs)
@@ -485,7 +497,7 @@ class _CfgLowerer(_Lowerer):
         steps = {bs.name: (bs.base, bs.jump) for bs in sched}
         return SteppedCompiled(
             self.fn.name, self.b.nl, params, param_signals, result.signal, halt, self.b.bus.probe, steps, self.names,
-            reset, schedule, out_terminal.out, status, in_terminal, io,
+            reset, schedule, out_terminal.out, status, in_terminal, self.input_terminals, io,
         )
 
     def _ge(self, k: int) -> Cond:
