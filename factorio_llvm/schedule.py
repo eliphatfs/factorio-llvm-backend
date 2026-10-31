@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 
 from .lower import Lowered, Wire
 
-GATE_TO_LATCH = 2  # ticks from a gate sampling a value to its register latching it
+GATE_TO_LATCH = 1  # ticks from a gate sampling a value to its register latching it
 
 
 def _show(v: Lowered, source: str) -> str:

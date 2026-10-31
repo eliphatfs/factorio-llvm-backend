@@ -1,40 +1,51 @@
-"""Fixed-size arrays (M3): one memory cell per word, read ports, bus writes.
+"""Fixed-size arrays (M3): chunked "each" memories, read ports, bus writes.
 
-Cell. Word ``i`` of an array is one decider on a private green loop: it
-outputs ``V`` and reads it back on green, so it holds its value. Its red input
-is the bus. When the bus carries a write to it (``E == array id`` and
-``A == i``) it copies ``V`` from the bus instead; while ``S <= 1`` (reset) or
-on ``E == -array id`` (clear) it copies the bus's ``V``, which is then absent,
-so the word becomes 0. A word with a non-zero initial value also has an init
-decider that outputs the value onto the loop while ``S <= 1``.
+Chunks. An array is cut into chunks of CHUNK words (every usable signal, 395).
+Word ``i`` is signal ``sigs[i % CHUNK]`` of chunk ``i // CHUNK``; external
+arrays use their I/O signals, so they are one chunk. Each chunk has:
 
-A read-only array (a constant global) is a ROM: a constant combinator per
-non-zero word on the same kind of private net.
+- a private green *loop* holding its words (absent = 0);
+- a *key*, a constant combinator on a private green net with each word's
+  signal = its address + 1 (addresses travel as address + 1, so word 0 is not
+  an absent signal);
+- a *cell* decider on the loop: each word passes unless masked;
+- a *write mask* decider: ``each(key) == A`` and ``E == array id`` (a store),
+  or ``E == -array id`` (clear) or ``S <= 1`` (reset) -> each = 1, onto a
+  private red net read by the cell;
+- a *writer*: the bus's ``V`` delayed one tick, times the mask, onto the loop.
+  The cell drops the old word the tick the writer puts the new one, and keeps
+  it from then on;
+- with non-zero initial values, a *seed* decider that puts them onto the
+  loop while ``S <= 2`` (one tick past the mask, so the cell keeps them).
 
-Write. A store is three pulses onto the bus at its block's gate step:
-address as ``A``, value as ``V``, array id as ``E``. Cells update one tick
-after registers would (step gate + 3, the next block's first step). Blocks end
-after each store (see ``frontend.split_after_stores``), so a later load always
-sees it.
+A read-only array (a constant global) is a ROM: one constant combinator per
+chunk with the non-zero words, as its loop.
+
+Write. A store pulses the bus at its block's gate step: address + 1 as ``A``
+(two pulses, the address and a 1), value as ``V``, array id as ``E``. The word
+is on the loop three ticks later, before the next block can read it. A block
+is split after a store that is followed by another store or by a load of the
+same array (see ``frontend.split_after_stores``).
+
+Read port. Port ``j`` of an array has an address net (``A`` = address + 1) and
+a result net. Per chunk it has a *read mask* (``each(key) == A`` -> each = 1)
+and a *reader*: for the masked signal, output its loop value as ``V`` onto the
+result net (only one chunk matches). A load drives the address net only while
+``S`` is inside its block's steps, so blocks share ports; a block with several
+loads of one array uses ports 0, 1, ... A load costs 5 ticks on top of its
+address: drive, rename to ``A`` (+1), mask, reader, rename to a block-local
+signal.
 
 I/O. An ``extern`` array is memory-mapped I/O on two red nets, each with a
 terminal constant combinator (empty, labelled INPUT / OUTPUT) for wiring the
 circuit to the factory. If the program never stores to it, it is an input:
-word ``i`` is ``x + 0`` of signal ``io[i]`` on the INPUT net, read live. Else it
-is an output: ordinary RAM whose words are also copied, as ``io[i]``, onto the
-OUTPUT net.
+its loop is an ``each + 0`` copy of the INPUT net. Else it is an output: RAM
+whose loop is also copied (``each + 0``) onto the OUTPUT net.
 
 Screen. A written extern array whose name starts with ``screen`` is a
-display instead: its words go onto a net of their own, read by a grid of lamps
-(``screen_width`` wide) that show each word as a packed 0xRRGGBB colour. The
-grid sits above the rest of the layout.
-
-Read port. Port ``j`` of an array has an address net (signal ``A``) and a
-result net. Each word has a reader decider per port: ``A == i`` -> copy ``V``
-from the word's loop onto the result net. A load drives the address net only
-while ``S`` is inside its block's steps, so blocks share ports; a block with
-several loads of one array uses ports 0, 1, ... A load costs 4 ticks on top of
-its address: drive, rename to ``A``, reader, rename to a block-local signal.
+display instead: a grid of lamps (``screen_width`` wide) on its loop, each
+showing its word as a packed 0xRRGGBB colour. The grid sits above the rest of
+the layout.
 """
 
 from __future__ import annotations
@@ -45,12 +56,13 @@ from .frontend import Array
 from .frontend import Unsupported
 from .lower import Lowered, Wire, _Builder
 from .netlist import GREEN, RED, Arithmetic, Cond, Constant, Decider, Lamp, Net, Out, Sig
-from .signals import allocatable_signals
+from .signals import EACH, allocatable_signals
 
 ADDRESS = "signal-A"
 VALUE = "signal-V"
 ENABLE = "signal-E"
-LOAD_LATENCY = 4  # ticks from a settled address to the loaded value
+LOAD_LATENCY = 5  # ticks from a settled address to the loaded value
+CHUNK = len(allocatable_signals())  # words per chunk: every usable signal
 
 
 @dataclass
@@ -71,10 +83,9 @@ class _Port:
 class _Bank:
     array: Array
     id: int
-    words: list[Net] = field(default_factory=list)  # each word's private green loop
+    loops: list[Net] = field(default_factory=list)  # each chunk's words
     ports: list[_Port] = field(default_factory=list)
     stored: bool = False  # the program writes to it
-    screen: Net | None = None  # screens: the net from the words to the lamps
     io: list[str] = field(default_factory=list)  # external arrays: signal per word
 
     @property
@@ -143,82 +154,122 @@ class Memory:
             out[a.name] = sigs
         return out
 
-    def _screen(self, bank: _Bank, width: int | None, x0: int) -> int:
+    def _screen(self, bank: _Bank, loop: Net, width: int | None, x0: int) -> int:
         """Place the lamp grid of a screen array from column ``x0``; return the next free column."""
         a = bank.array
         w = width or max(1, round(a.size**0.5))
         rows = -(-a.size // w)
         if rows > MAX_SCREEN_ROWS:
             raise Unsupported(f"@{a.name}: {rows} rows of lamps; at most {MAX_SCREEN_ROWS} (pass a larger --screen-width)")
-        bank.screen = self.b.nl.net(RED, f"{a.name} lamps")
         for i, sig in enumerate(bank.io):
             r, c = divmod(i, w)
             # Rows end 3 tiles above y = 0, leaving room for a row of substations.
             lamp = Lamp(rgb=sig, label=f"{a.name}[{i}]", position=(x0 + c + 0.5, r - rows - 2 + 0.5))
             self.b.place(lamp, (), None, "screen")
-            bank.screen.attach(lamp.inp)
+            loop.attach(lamp.inp)
         return x0 + w + 1
 
     def build(self, inputs: Net | None, outputs: Net, screen_width: int | None = None) -> None:
-        """Place every word and its readers."""
-        s_red = Sig(self.step, frozenset({RED}))
+        """Place every chunk and its readers."""
         screen_x = 0
         for bank in self.banks.values():
             a = bank.array
             group = f"array {a.name}"
-            if bank.is_screen:
-                screen_x = self._screen(bank, screen_width, screen_x)
-            for i, init in enumerate(a.init):
-                loop = self.b.nl.net(GREEN, f"{a.name}[{i}]")
-                bank.words.append(loop)
-                if bank.is_input:
-                    assert inputs is not None
-                    pin = Arithmetic(Sig(bank.io[i], frozenset({RED})), "+", 0, VALUE, label=f"{a.name}[{i}] <- {bank.io[i]}")
-                    self.b.place(pin, (), loop, group)
-                    inputs.attach(pin.inp)
-                    continue
-                if a.external:
-                    pin = Arithmetic(Sig(VALUE, frozenset({GREEN})), "+", 0, bank.io[i], label=f"{a.name}[{i}] -> {bank.io[i]}")
-                    self.b.place(pin, (), bank.screen if bank.is_screen else outputs, group)
-                    loop.attach(pin.inp)
-                if a.readonly:
-                    if init:
-                        loop.attach(self.b.place(Constant({VALUE: init}, label=f"{a.name}[{i}]"), (), None, group).out)
-                    continue
-                cell = Decider(
-                    [
-                        Cond(s_red, "<=", 1),
-                        Cond(Sig(ENABLE, frozenset({RED})), "=", -bank.id, join="or"),
-                        Cond(Sig(ENABLE, frozenset({RED})), "=", bank.id, join="or"),
-                        Cond(Sig(ADDRESS, frozenset({RED})), "=", i),
-                    ],
-                    [Out(VALUE, networks=RED)],
-                    [Out(VALUE, networks=GREEN)],
-                    label=f"{a.name}[{i}]",
-                )
-                self.b.place(cell, (RED,), loop, group)
-                loop.attach(cell.inp)
-                if init:
-                    seed = Decider([Cond(s_red, "<=", 1)], [Out(VALUE, copy=False, constant=init)], label=f"{a.name}[{i}] init")
-                    self.b.place(seed, (RED,), loop, group)
-            for j, port in enumerate(bank.ports):
-                for i, loop in enumerate(bank.words):
-                    if a.readonly and not a.init[i]:
-                        continue
-                    reader = Decider(
-                        [Cond(Sig(ADDRESS, frozenset({RED})), "=", i)],
-                        [Out(VALUE, networks=GREEN)],
-                        label=f"{a.name}[{i}] read port {j}",
-                    )
-                    self.b.place(reader, (), port.result, group)
-                    port.address.attach(reader.inp)
-                    loop.attach(reader.inp)
+            sigs = bank.io if a.external else _CHUNK_SIGNALS
+            for base in range(0, a.size, CHUNK):
+                words = list(zip(sigs, a.init[base : base + CHUNK]))
+                loop = self.b.nl.net(GREEN, f"{a.name}[{base}..]")
+                bank.loops.append(loop)
+                key_net = self._chunk(bank, base, words, loop, inputs, outputs, group)
+                if bank.is_screen:
+                    screen_x = self._screen(bank, loop, screen_width, screen_x)
+                for j, port in enumerate(bank.ports):
+                    self._reader(bank, base, j, port, key_net, loop, group)
 
+    def _key(self, a: Array, base: int, words: list[tuple[str, int]], group: str) -> Net:
+        net = self.b.nl.net(GREEN, f"{a.name}[{base}..] key")
+        key = Constant({s: base + k + 1 for k, (s, _) in enumerate(words)}, label=f"{a.name}[{base}..] addresses + 1")
+        net.attach(self.b.place(key, (), None, group).out)
+        return net
+
+    def _chunk(
+        self, bank: _Bank, base: int, words: list[tuple[str, int]], loop: Net, inputs: Net | None, outputs: Net, group: str
+    ) -> Net:
+        """Place one chunk's storage (or input copy, or ROM constant) on ``loop``; return its key net."""
+        a = bank.array
+        name = f"{a.name}[{base}..]"
+        s_red = Sig(self.step, frozenset({RED}))
+        if bank.is_input:
+            assert inputs is not None
+            copy = Arithmetic(Sig(EACH, frozenset({RED})), "+", 0, EACH, label=f"{name} <- INPUT")
+            self.b.place(copy, (), loop, group)
+            inputs.attach(copy.inp)
+            return self._key(a, base, words, group)
+        if a.readonly:
+            rom = {s: v for s, v in words if v}
+            if rom:
+                loop.attach(self.b.place(Constant(rom, label=name), (), None, group).out)
+            return self._key(a, base, words, group) if bank.ports else loop
+        key_net = self._key(a, base, words, group)
+        mask = self.b.nl.net(RED, f"{name} write mask")
+        e = Sig(ENABLE, frozenset({RED}))
+        write_mask = Decider(
+            [
+                Cond(Sig(EACH, frozenset({GREEN})), "=", Sig(ADDRESS, frozenset({RED}))),
+                Cond(e, "=", bank.id),
+                Cond(e, "=", -bank.id, join="or"),
+                Cond(s_red, "<=", 1, join="or"),
+            ],
+            [Out(EACH, copy=False, constant=1)],
+            label=f"{name} write mask",
+        )
+        self.b.place(write_mask, (RED,), mask, group)
+        key_net.attach(write_mask.inp)
+        delayed = self.b.nl.net(GREEN, f"{name} value")
+        self.b.place(Arithmetic(Sig(VALUE, frozenset({RED})), "+", 0, VALUE, label=f"{name} value (delay)"), (RED,), delayed, group)
+        writer = Arithmetic(Sig(EACH, frozenset({RED})), "*", Sig(VALUE, frozenset({GREEN})), EACH, label=f"{name} writer")
+        self.b.place(writer, (), loop, group)
+        mask.attach(writer.inp)
+        delayed.attach(writer.inp)
+        cell = Decider(
+            [Cond(Sig(EACH, frozenset({GREEN})), "!=", 0), Cond(Sig(EACH, frozenset({RED})), "=", 0)],
+            [Out(EACH, networks=GREEN)],
+            label=name,
+        )
+        self.b.place(cell, (), loop, group)
+        loop.attach(cell.inp)
+        mask.attach(cell.inp)
+        init = [Out(s, copy=False, constant=v) for s, v in words if v]
+        if init:
+            self.b.place(Decider([Cond(s_red, "<=", 2)], init, label=f"{name} init"), (RED,), loop, group)
+        if a.external and not bank.is_screen:
+            pin = Arithmetic(Sig(EACH, frozenset({GREEN})), "+", 0, EACH, label=f"{name} -> OUTPUT")
+            self.b.place(pin, (), outputs, group)
+            loop.attach(pin.inp)
+        return key_net
+
+    def _reader(self, bank: _Bank, base: int, j: int, port: _Port, key_net: Net, loop: Net, group: str) -> None:
+        name = f"{bank.array.name}[{base}..] port {j}"
+        mask = self.b.nl.net(RED, f"{name} mask")
+        pick = Decider(
+            [Cond(Sig(EACH, frozenset({GREEN})), "=", Sig(ADDRESS, frozenset({RED})))],
+            [Out(EACH, copy=False, constant=1)],
+            label=f"{name} mask",
+        )
+        self.b.place(pick, (), mask, group)
+        key_net.attach(pick.inp)
+        port.address.attach(pick.inp)
+        reader = Decider([Cond(Sig(EACH, frozenset({RED})), "!=", 0)], [Out(VALUE, networks=GREEN)], label=f"{name} reader")
+        self.b.place(reader, (), port.result, group)
+        mask.attach(reader.inp)
+        loop.attach(reader.inp)
 
 MAX_SCREEN_ROWS = 16  # two rows of substations power at most this many
 
 
 # Default I/O signals: digits, then letters, then the rest.
+_CHUNK_SIGNALS = allocatable_signals()
+
 _IO_ORDER = [s for s in allocatable_signals() if s.startswith("signal-") and s[-1].isdigit()] + [
     s for s in allocatable_signals() if not (s.startswith("signal-") and s[-1].isdigit()) and s != "signal-check"
 ]

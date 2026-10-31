@@ -38,7 +38,7 @@ the simulated circuit with the same C compiled natively.
 M2 handles branches, loops, `switch` and `phi`. A step signal `S` on the bus
 counts up one per tick, and each basic block owns a range of steps. Values that
 cross blocks, and every phi, live in one-decider bus registers; branches add a
-constant to `S`. Each block costs its own depth plus 3 ticks per visit. `ret`
+constant to `S`. Each block costs its own depth (at least 1) plus 2 ticks per visit. `ret`
 writes the result register and holds `S` at the halt step. Stepped blueprints
 are placed with the `RESET` constant combinator switched on, which holds `S` at
 1; switch it off to run, and on and off again to rerun with new arguments.
@@ -49,10 +49,12 @@ and closed-form loop exit values (`factorio_llvm.frontend.CLANG_FLAGS`).
 M3 supports fixed-size `i32` arrays: local (`alloca`) or global, with or
 without initial values, and constant globals as ROM tables. `getelementptr`,
 `load`, `store` and `memset` of a whole array to 0 are handled; i64 is accepted
-for indices and computed in 32 bits. Each word is one decider holding its value
-on a private loop; each read port adds a reader per word, and a load costs 4
-ticks on top of its address. Blocks are split after every store, so a store
-takes effect before the next load. Memory is cleared (or reset to its initial
+for indices and computed in 32 bits. Arrays are stored in chunks of 395 words (one per
+usable signal) on a private loop: a chunk costs about 5 combinators and each
+read port 2 more per chunk, whatever its size, and a load costs 5 ticks on top
+of its address. A block is split after a store only when a later
+store, or a load of the same array, follows it in the block, so a store takes
+effect before that load. Memory is cleared (or reset to its initial
 values) while `RESET` is on. Not supported: pointer arguments, pointers that
 may point into different arrays, other element types, `memcpy`.
 
