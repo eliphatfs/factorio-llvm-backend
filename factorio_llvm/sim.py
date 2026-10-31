@@ -290,7 +290,7 @@ class Simulator:
 
     def message(self, panel: Panel) -> str:
         """The text a display panel shows this tick ("" if none)."""
-        return next((m.text for m in panel.messages if self._holds(panel, m.condition)), "")
+        return next((m.text for m in panel.messages if self._holds(panel, m.condition)), panel.text)
 
     def output(self, e: Entity) -> Signals:
         """What ``e`` is outputting this tick."""

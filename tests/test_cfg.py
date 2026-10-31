@@ -165,3 +165,22 @@ def test_schedule_of_gcd(ir):
     assert len(back) == 1 and back[0].step + 1 + back[0].delta == body.base  # the loop's back edge
     assert all(w.step == body.gate for w in body.writes)
     assert "goto while.body" in str(s)
+
+
+def test_substations_are_joined_by_copper_wire(ir):
+    from factorio_llvm.blueprint import COPPER, decode
+
+    c = lower(read_function(ir, "gcd"))
+    bp = decode(export_string(c.netlist))["blueprint"]
+    subs = {e["entity_number"] for e in bp["entities"] if e["name"] == "substation"}
+    copper = [w for w in bp["wires"] if w[1] == COPPER]
+    assert all(w[3] == COPPER and w[0] in subs and w[2] in subs for w in copper)
+    # one electric network: the copper wires form a spanning tree
+    assert len(copper) == len(subs) - 1
+    seen, todo = set(), [next(iter(subs))]
+    while todo:
+        n = todo.pop()
+        if n not in seen:
+            seen.add(n)
+            todo += [b if a == n else a for a, _, b, _ in copper if n in (a, b)]
+    assert seen == subs

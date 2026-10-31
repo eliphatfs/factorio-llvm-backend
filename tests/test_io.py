@@ -62,7 +62,9 @@ def test_chosen_io_signals_and_round_trip(ir):
     bp = export_string(c.netlist)
     back = import_string(bp)
     assert check_reach(back) == []
-    assert sum(isinstance(e, Panel) for e in back.entities) == 1
+    panels = [e for e in back.entities if isinstance(e, Panel)]
+    assert sorted(p.text for p in panels if not p.messages) == ["INPUT", "OUTPUT", "RESET (turn off to run)"]
+    assert all(p.always_show for p in panels)
     pos = {id(e): e.position for e in c.netlist.entities}
     by_pos = {e.position: e for e in back.entities}
     terminal_in = by_pos[pos[id(c.inputs)]]
@@ -116,3 +118,11 @@ def test_main_is_the_default_and_may_return_void():
     sim.run_until(lambda s: s.read(c.output, DONE, [RED]) == 1, 10_000)
     sim.step(3)
     assert sim.network(c.output, RED) == {DONE: 1, "signal-0": 42}
+
+
+def test_lamps_are_always_on(ir):
+    from factorio_llvm.blueprint import to_blueprint
+
+    c = lower(read_function(ir, "draw"))
+    lamps = [e for e in to_blueprint(c.netlist)["blueprint"]["entities"] if e["name"] == "small-lamp"]
+    assert lamps and all(e["always_on"] for e in lamps)

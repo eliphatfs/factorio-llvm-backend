@@ -7,6 +7,8 @@ a constant combinator has only 1 (red) and 2 (green).
 
 from __future__ import annotations
 
+import math
+
 import base64
 import json
 import zlib
@@ -175,6 +177,34 @@ def _connector_id(c: Connector, color: Color) -> int:
     return base + (0 if color == RED else 1)
 
 
+COPPER = 5  # wire connector id of a pole's copper (power) wire
+SUBSTATION_REACH = 18.0
+
+
+def power_links(netlist: Netlist) -> list[tuple[Pole, Pole]]:
+    """Copper wires joining the substations: a minimum spanning forest within wire reach."""
+    poles = [e for e in netlist.entities if isinstance(e, Pole) and e.position is not None]
+    links: list[tuple[Pole, Pole]] = []
+    done: set[int] = set()
+    for start in range(len(poles)):
+        if start in done:
+            continue
+        done.add(start)
+        best = {i: (math.dist(poles[start].position, poles[i].position), start) for i in range(len(poles)) if i not in done}
+        while best:
+            i, (d, j) = min(best.items(), key=lambda kv: kv[1][0])
+            if d > SUBSTATION_REACH:
+                break
+            del best[i]
+            done.add(i)
+            links.append((poles[j], poles[i]))
+            for k in best:
+                dk = math.dist(poles[i].position, poles[k].position)
+                if dk < best[k][0]:
+                    best[k] = (dk, i)
+    return links
+
+
 def to_blueprint(netlist: Netlist, label: str = "factorio-llvm") -> dict[str, Any]:
     if netlist.logical:
         from .layout import physical
@@ -193,6 +223,15 @@ def to_blueprint(netlist: Netlist, label: str = "factorio-llvm") -> dict[str, An
         }
         if not isinstance(e, Pole):
             ent["control_behavior"] = _control_behavior(e)
+        if isinstance(e, Lamp):
+            ent["always_on"] = True  # lit in daylight too
+        if isinstance(e, Panel):
+            if e.text:
+                ent["text"] = e.text
+            if e.icon:
+                ent["icon"] = _signal(e.icon)
+            if e.always_show:
+                ent["always_show"] = True
         if e.label:
             ent["player_description"] = e.label
         entities.append(ent)
@@ -200,6 +239,7 @@ def to_blueprint(netlist: Netlist, label: str = "factorio-llvm") -> dict[str, An
         [numbers[id(w.a.entity)], _connector_id(w.a, w.color), numbers[id(w.b.entity)], _connector_id(w.b, w.color)]
         for w in netlist.wires
     ]
+    wires += [[numbers[id(a)], COPPER, numbers[id(b)], COPPER] for a, b in power_links(netlist)]
     return {
         "blueprint": {
             "item": "blueprint",
@@ -251,7 +291,8 @@ def _entity_in(d: dict[str, Any]) -> Entity:
         return Lamp(_cond_in(cb["circuit_condition"]), label=label, position=pos)
     if name == "display-panel":
         msgs = [Message(_cond_in(m["condition"]), m["icon"]["name"], m.get("text", "")) for m in cb.get("parameters", [])]
-        return Panel(msgs, label=label, position=pos)
+        icon = d.get("icon", {}).get("name")
+        return Panel(msgs, d.get("text", ""), icon, bool(d.get("always_show")), label=label, position=pos)
     if name == "constant-combinator":
         signals: dict[str, int] = {}
         for section in cb.get("sections", {}).get("sections", []):
@@ -306,6 +347,8 @@ def from_blueprint(obj: dict[str, Any]) -> Netlist:
         return Connector(e, side), color
 
     for a, ca, b, cb in bp.get("wires", []):
+        if ca == COPPER or cb == COPPER:
+            continue  # power wires: rebuilt by power_links on export
         (pa, color), (pb, color_b) = conn(a, ca), conn(b, cb)
         if color != color_b:
             raise ValueError("wire joins different colours")
