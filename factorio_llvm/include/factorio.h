@@ -19,7 +19,7 @@
  *   Define SCREEN_W and SCREEN_H before the include to get
  *   extern volatile int screen[SCREEN_H * SCREEN_W], a grid of always-on
  *   lamps, row-major, top-left first. Write a packed colour from RGB(); 0 is
- *   off. At most 16 rows. Writes show up a few ticks after the store.
+ *   off. Any size; past 16 rows or columns each 18x18 tiles lose 2x2 lamps to a power substation. Writes show up a few ticks after the store.
  *
  * Clock
  *   ticks() is a counter that adds 1 every game tick (60 a second), from the

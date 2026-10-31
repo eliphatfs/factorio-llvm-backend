@@ -50,9 +50,12 @@ its loop is an ``each + 0`` copy of the INPUT net. Else it is an output: RAM
 whose loop is also copied (``each + 0``) onto the OUTPUT net.
 
 Screen. A written extern array whose name starts with ``screen`` is a
-display instead: a grid of lamps (``screen_width`` wide) on its loop, each
+display instead: a grid of lamps (``screen_width`` wide, any size), each
 showing its word as a packed 0xRRGGBB colour. The grid sits above the rest of
-the layout.
+the layout. Each chunk's lamps are one block on that chunk's loop (they reuse
+the same 395 signals): lamps wire to their neighbours, and the router takes the
+block out through the ring of substations around the screen. Substations
+inside the screen, only where power needs them, take 2x2 lamps each.
 """
 
 from __future__ import annotations
@@ -61,8 +64,9 @@ from dataclasses import dataclass, field
 
 from .frontend import Array
 from .frontend import Unsupported
+from .layout import screen_poles
 from .lower import Lowered, Wire, _Builder
-from .netlist import GREEN, RED, Color, Arithmetic, Cond, Constant, Decider, Gate, Lamp, Net, Out, Sig, Wall
+from .netlist import GREEN, RED, Color, Arithmetic, Cond, Constant, Decider, Gate, Lamp, Net, Out, Pole, Sig, Wall
 from .signals import EACH, allocatable_signals
 
 ADDRESS = "signal-A"
@@ -179,12 +183,14 @@ class Memory:
                 raise Unsupported(f"@joystick must have {len(JOYSTICK)} words (one per direction), not {a.size}")
             if a.name in chosen:
                 sigs = chosen[a.name]
-                if len(sigs) != a.size:
+                if len(sigs) != (min(a.size, CHUNK) if bank.is_screen else a.size):
                     raise Unsupported(f"--io {a.name}: {len(sigs)} signals for {a.size} words")
             else:
                 pool = JOYSTICK if bank.is_joystick else [CLOCK] if bank.is_clock else _IO_ORDER
-                sigs = [s for s in pool if s not in used[side]][: a.size]
-                if len(sigs) < a.size:
+                # A screen's chunks are separate lamp blocks, so they reuse one chunk's signals.
+                n = min(a.size, CHUNK) if bank.is_screen else a.size
+                sigs = _CHUNK_SIGNALS[:n] if bank.is_screen else [s for s in pool if s not in used[side]][:n]
+                if len(sigs) < n:
                     raise Unsupported(f"@{a.name} has more words than there are signals")
             clash = used[side] & set(sigs)
             if clash or len(set(sigs)) != len(sigs):
@@ -194,20 +200,28 @@ class Memory:
             out[a.name] = sigs
         return out
 
-    def _screen(self, bank: _Bank, loop: Net, width: int | None, x0: int) -> int:
-        """Place the lamp grid of a screen array from column ``x0``; return the next free column."""
+    def _screen(self, bank: _Bank, loop: Net, width: int | None, x0: int, base: int) -> int:
+        """Place the lamps of one chunk of a screen array (and, with its first
+        chunk, the screen's substations) from column ``x0``; return the next
+        free column. A lamp whose tile a substation needs is left out."""
         a = bank.array
         w = width or max(1, round(a.size**0.5))
         rows = -(-a.size // w)
-        if rows > MAX_SCREEN_ROWS:
-            raise Unsupported(f"@{a.name}: {rows} rows of lamps; at most {MAX_SCREEN_ROWS} (pass a larger --screen-width)")
-        for i, sig in enumerate(bank.io):
-            r, c = divmod(i, w)
-            # Rows end 3 tiles above y = 0, leaving room for a row of substations.
-            lamp = Lamp(rgb=sig, label=f"{a.name}[{i}]", position=(x0 + c + 0.5, r - rows - 2 + 0.5))
+        top = -rows - 2  # rows end 3 tiles above y = 0, above the bottom ring of substations
+        dead = set()
+        for tx, ty in screen_poles(x0, top, w, rows):
+            dead |= {(tx + i, ty + j) for i in (0, 1) for j in (0, 1)}
+            if base == 0:
+                self.b.nl.add(Pole(label="substation", position=(tx + 1.0, ty + 1.0), group="screen"))
+        for k, sig in enumerate(bank.io[: min(CHUNK, a.size - base)]):
+            r, c = divmod(base + k, w)
+            if (x0 + c, top + r) in dead:
+                continue
+            lamp = Lamp(rgb=sig, label=f"{a.name}[{base + k}]", position=(x0 + c + 0.5, top + r + 0.5))
             self.b.place(lamp, (), None, "screen")
             loop.attach(lamp.inp)
-        return x0 + w + 1
+        return x0 + w + 2
+
 
     def build(self, inputs: Net | None, outputs: Net, screen_width: int | None = None) -> None:
         """Place every chunk and its readers."""
@@ -228,7 +242,9 @@ class Memory:
                 source = joystick if bank.is_joystick else self.clock if bank.is_clock else inputs
                 self._chunk(bank, base, words, loop, source, outputs, group)
                 if bank.is_screen:
-                    screen_x = self._screen(bank, loop, screen_width, screen_x)
+                    next_x = self._screen(bank, loop, screen_width, screen_x, base)
+            if bank.is_screen:
+                screen_x = next_x
             # Readers port by port, each with its own copy of the chunk's key,
             # so a port's nets stay short and only the chunk loops reach across.
             for j, port in enumerate(bank.ports):
@@ -368,7 +384,6 @@ class Memory:
         mask.attach(reader.inp)
         loop.attach(reader.inp)
 
-MAX_SCREEN_ROWS = 16
 
 # extern volatile int joystick[8]: N, NE, E, SE, S, SW, W, NW (see include/factorio.h).
 JOYSTICK = ("up-arrow", "up-right-arrow", "right-arrow", "down-right-arrow", "down-arrow", "down-left-arrow", "left-arrow", "up-left-arrow")

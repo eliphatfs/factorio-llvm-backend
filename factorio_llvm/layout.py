@@ -11,8 +11,8 @@ Entities are placed group by group (a basic block, a register, ...) in a
 serpentine order, so a group's members sit next to each other.
 
 Entities in group ``FIXED`` (a screen's lamps) keep the position they were
-given; a row of substations above and below them powers them and joins them to
-the relay network.
+given, and so do the substations of the screen (see :func:`screen_poles`),
+which power the lamps and join them to the relay network.
 
 Routing. Each logical net becomes a minimum spanning tree over its members.
 A tree edge within combinator reach is one wire. A longer edge goes through
@@ -72,28 +72,47 @@ def _ordered(entities: list[Entity]) -> list[Entity]:
 FIXED = "screen"
 
 
-def _fixed_poles(fixed: list[Entity]) -> list[Pole]:
-    """Substations above and below a block of fixed 1x1 entities."""
-    if not fixed:
-        return []
-    xs = [e.position[0] for e in fixed if e.position]
-    ys = [e.position[1] for e in fixed if e.position]
-    top, bottom = math.floor(min(ys)), math.floor(max(ys))
-    poles = []
-    x = math.floor(min(xs)) + CELL // 2
-    while True:
-        for y in (top - 1.0, bottom + 2.0):  # 2x2 tiles just outside the block
-            poles.append(Pole(label="substation", position=(float(x), y), group="power"))
-        if x + CELL // 2 > max(xs):
-            break
-        x += CELL
-    return poles
+SUPPLY = 9  # tiles from a substation's centre that it powers
+
+
+def _axis(lo: int, n: int) -> list[int]:
+    """Top-left coordinates of substations along one side of ``n`` lamps from
+    ``lo``: one just outside each end, plus as few inside as power needs (each
+    inside one costs two rows or columns of lamps)."""
+    first, last = lo - 2, lo + n  # just outside: they power SUPPLY - 1 lamps in
+    out = [first]
+    covered = lo + SUPPLY - 1  # first lamp not powered yet
+    while covered < last - (SUPPLY - 1):
+        p = min(covered + SUPPLY - 1, last - 2)  # tiles p, p + 1; powers p - 8 .. p + 9
+        out.append(p)
+        covered = p + SUPPLY + 1
+    out.append(last)
+    return out
+
+
+def screen_poles(x0: int, y0: int, w: int, h: int) -> list[tuple[int, int]]:
+    """Top-left tiles of the substations of a ``w`` x ``h`` lamp screen whose
+    top-left lamp is at (x0, y0): a ring around it for wire channels, and a grid
+    for power. Grid points inside the screen take 2x2 lamps ("dead pixels"),
+    and there are only as many of them as needed to power every lamp."""
+    xs, ys = _axis(x0, w), _axis(y0, h)
+    out = {(x, y) for x in xs for y in ys}
+    # More ring substations between the grid ones: each carries one net per
+    # colour, and every lamp block's net leaves the screen through the ring.
+    for x in range(xs[0], xs[-1], 4):
+        if all(abs(x - g) >= 2 for g in xs):
+            out |= {(x, ys[0]), (x, ys[-1])}
+    for y in range(ys[0], ys[-1], 4):
+        if all(abs(y - g) >= 2 for g in ys):
+            out |= {(xs[0], y), (xs[-1], y)}
+    return sorted(out)
 
 
 def place(netlist: Netlist, per_cell: int = SLOTS_PER_CELL) -> list[Pole]:
     """Give every entity a position, at most ``per_cell`` to a cell (spread over
     its slots); return all substation sites, power ones first."""
     fixed = [e for e in netlist.entities if e.group == FIXED and e.position is not None]
+    fixed_poles = [Pole(label=e.label, position=e.position, group="power") for e in fixed if isinstance(e, Pole)]
     entities = _ordered([e for e in netlist.entities if not isinstance(e, Pole) and not any(e is f for f in fixed)])
     ncells = max(1, math.ceil(len(entities) / per_cell))
     width = max(1, math.ceil(math.sqrt(ncells)))
@@ -111,7 +130,7 @@ def place(netlist: Netlist, per_cell: int = SLOTS_PER_CELL) -> list[Pole]:
             e.position = (ox + col + 0.5, oy + 2 * rp + 0.5)
         else:
             e.position = (ox + col + 0.5, oy + 2 * rp + 1.0)
-    return _fixed_poles(fixed) + poles
+    return fixed_poles + poles
 
 
 def _dist(a: Entity, b: Entity) -> float:
@@ -160,7 +179,15 @@ class _Router:
         return self.owner.get((i, net.color), net) is net
 
     def _relay(self, a: Connector, b: Connector, net: Net) -> None:
-        starts = [i for i, p in enumerate(self.poles) if _dist(p, a.entity) <= COMBINATOR_REACH and self._free(i, net)]
+        # A screen's lamps are all joined by short wires, so the relay may
+        # start from whichever lamp of the net is nearest a free substation.
+        froms = [m for m in net.members if m.entity.group == FIXED] if a.entity.group == FIXED else [a]
+        start_at: dict[int, Connector] = {}
+        for m in froms:
+            for i, p in enumerate(self.poles):
+                if i not in start_at and _dist(p, m.entity) <= COMBINATOR_REACH and self._free(i, net):
+                    start_at[i] = m
+        starts = list(start_at)
         goals = {i for i, p in enumerate(self.poles) if _dist(p, b.entity) <= COMBINATOR_REACH and self._free(i, net)}
         prev: dict[int, int | None] = {i: None for i in starts}
         queue = deque(starts)
@@ -184,7 +211,7 @@ class _Router:
         path.reverse()
         for i in path:
             self.owner[(i, net.color)] = net
-        hops = [a] + [self.poles[i].out for i in path] + [b]
+        hops = [start_at[path[0]]] + [self.poles[i].out for i in path] + [b]
         for x, y in zip(hops, hops[1:]):
             if x != y:
                 self.wires.append(WireSeg(net.color, x, y))
@@ -195,6 +222,8 @@ class _Router:
             if d <= min(_reach(a.entity), _reach(b.entity)):
                 if a != b:
                     self.wires.append(WireSeg(net.color, a, b))
+            elif b.entity.group == FIXED:
+                self._relay(b, a, net)
             else:
                 self._relay(a, b, net)
 
@@ -220,7 +249,8 @@ def physical(netlist: Netlist) -> Netlist:
             per_cell = max(1, per_cell * 2 // 3)
     out = Netlist()
     for e in _ordered(netlist.entities):
-        out.add(e)
+        if not isinstance(e, Pole):
+            out.add(e)
     out.wires = list(netlist.wires)
     used = {i for i, _ in router.owner}
     for i, p in enumerate(poles):
