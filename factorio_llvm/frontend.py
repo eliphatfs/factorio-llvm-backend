@@ -377,8 +377,28 @@ def _point_to_arrays(fn: Function) -> None:
                 raise Unsupported(f"pointer does not point into a known array: {op.text}")
 
 
+def _array_of(op: Op) -> Array | None:
+    ptr = op.args[0] if op.opcode in ("load", "clear") else op.args[1]
+    return ptr if isinstance(ptr, Array) else getattr(ptr, "array", None)
+
+
+def _conflicts(write: Op, rest: list[Op]) -> bool:
+    """Whether an op in ``rest`` must see ``write``'s effect, or would share its bus step."""
+    target = _array_of(write)
+    for op in rest:
+        if op.opcode in ("store", "clear"):
+            return True
+        if op.opcode == "load" and (target is None or _array_of(op) in (None, target)):
+            return True
+    return False
+
+
 def split_after_stores(fn: Function) -> Function:
-    """End a block after each store or clear, so later loads see the new contents.
+    """End a block after a store or clear when the rest of it needs that.
+
+    A block's stores all go onto the bus at its gate step, and the array
+    changes only after the block, so it ends after a store or clear that is
+    followed in it by another store or clear, or by a load of the same array.
 
     The block keeps its name for the part that runs first (branches go there);
     successors' phis are told about the part that now ends with the terminator.
@@ -390,7 +410,7 @@ def split_after_stores(fn: Function) -> Function:
         n = 0
         for i, op in enumerate(b.ops):
             piece.ops.append(op)
-            if op.opcode in ("store", "clear") and i + 1 < len(b.ops):
+            if op.opcode in ("store", "clear") and _conflicts(op, b.ops[i + 1 :]):
                 n += 1
                 nxt = Block(f"{b.name}.{n}")
                 piece.term = Term("br", [nxt.name], text=f"br label %{nxt.name}  ; after {op.text}")

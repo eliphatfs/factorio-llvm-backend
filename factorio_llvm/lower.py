@@ -82,6 +82,7 @@ class Compiled:
 
 
 PRIVATE_CONSTANT = "signal-dot"  # name for a constant on a private two-entity net
+GATE = "signal-dot"  # a block's "sample now" flag on its local net (never a value there)
 
 
 class _Builder:
@@ -116,7 +117,7 @@ class _Builder:
 
     def begin_block(self, name: str) -> Net:
         self.local = self.nl.net(GREEN, f"block {name}")
-        self._local_free = list(reversed(allocatable_signals()))
+        self._local_free = [s for s in reversed(allocatable_signals()) if s != GATE]
         self.group = name
         return self.local
 

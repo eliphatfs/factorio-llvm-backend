@@ -3,16 +3,17 @@
 Control is one step signal ``S`` on the red bus, counting up by one each tick.
 Each basic block owns a range of steps:
 
-    base .. e        the block's combinators settle (e - base = its depth)
-    e                write gates sample the values to keep
-    e + 2            registers latch them; the branch decider fires
-    e + 3            S lands on the next block's base
+    base .. e        the block's combinators settle (e - base = its depth, >= 1)
+    e - 1            a decider raises the block's GATE flag for one tick
+    e                ``value * GATE`` samples and renames each value to keep
+    e + 1            registers latch them; the branch decider fires
+    e + 2            S lands on the next block's base
 
 Values used only inside their block are read straight from their combinator.
 A value used in another block, and every phi, lives in a bus register, so it is
 stable for the whole of every later block. A register is one decider; each
-write to it adds a gate decider and an ``x + 0`` that renames the gated value to
-the register's signal. The renames all drive one shared green write net, which
+write to it adds one arithmetic ``value * GATE`` that outputs the register's
+signal, so it is 0 except at the gate step. These all drive one shared green write net, which
 every register reads, so a register needs no wiring of its own beyond the bus
 and that net.
 
@@ -26,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .frontend import Array, Block, Function, Op, Operand, Unsupported, Value
-from .lower import PRIVATE_CONSTANT, Lowered, Wire, _Builder, _colors, _depth, _Lowerer, _operand
+from .lower import GATE, PRIVATE_CONSTANT, Lowered, Wire, _Builder, _colors, _depth, _Lowerer, _operand
 from .netlist import GREEN, RED, Arithmetic, Cond, Connector, Constant, Decider, Message, Net, Netlist, Out, Panel, Sig
 from .memory import ADDRESS, ENABLE, VALUE, Memory, Ptr
 from .schedule import GATE_TO_LATCH, BlockSchedule, Jump, Load, Register, Schedule, Store, Test, Write
@@ -91,6 +92,7 @@ class _CfgLowerer(_Lowerer):
         self.mem = Memory(self.b, self.step, fn.arrays) if fn.arrays else None
         self.loads: list[Load] = []  # the current block's, while lowering it
         self.stores: list[Store] = []
+        self.gates: set[tuple[int, int]] = set()  # (block net, step) with a GATE flag
 
     # values: block-local combinators first, then registers and arguments
     def get(self, a: Operand):
@@ -205,18 +207,32 @@ class _CfgLowerer(_Lowerer):
         private.attach(rename.inp)
         self.b.place(rename, (), net)
 
+    def _gated(self, step: int, v: Lowered, signal: str, net: Net, label: str) -> None:
+        """Put ``v`` on ``net`` as ``signal`` for the one tick after S = ``step``.
+
+        A decider in the block raises GATE = 1 on the local net while S = step - 1,
+        so at S = step one arithmetic ``v * GATE`` both samples and renames.
+        """
+        key = (id(self.b.local), step)
+        if key not in self.gates:
+            flag = Decider([self._step_is(step - 1)], [Out(GATE, copy=False, constant=1)], label=f"gate at {step}")
+            self.b.place(flag, (RED,), GREEN)
+            self.gates.add(key)
+        g = Sig(GATE, frozenset({GREEN}))
+        pick = Arithmetic(g, "*", _operand(v), signal, label=label)
+        self.b.place(pick, _colors(v) | {GREEN}, net)
+
     def _emit_write(self, w: Write) -> None:
-        self._pass([self._step_is(w.step)], w.value, w.register.signal, self.writes, f"{w.label} (write at {w.step})")
+        self._gated(w.step, w.value, w.register.signal, self.writes, f"{w.label} (write at {w.step})")
 
     def _emit_store(self, st: Store) -> None:
-        at = [self._step_is(st.step)]
         if st.clear:
-            self._pass(at, -st.array_id, ENABLE, self.b.bus, f"clear {st.array}")
+            self._gated(st.step, -st.array_id, ENABLE, self.b.bus, f"clear {st.array}")
             return
         label = f"store {st.array} at {st.step}"
         for v, sig in ((st.address, ADDRESS), (st.value, VALUE), (st.array_id, ENABLE)):
             if v != 0:
-                self._pass(at, v, sig, self.b.bus, f"{label} ({sig})")
+                self._gated(st.step, v, sig, self.b.bus, f"{label} ({sig})")
 
     def _emit_load(self, ld: Load, bs: BlockSchedule) -> None:
         assert self.mem is not None
@@ -280,7 +296,9 @@ class _CfgLowerer(_Lowerer):
             for op in b.ops:
                 self.set(op.result, self.op(op))
             lowered[b.name] = self.local
-            bs = BlockSchedule(b.name, k, self._block_depth(b), loads=self.loads, stores=self.stores)
+            # Depth >= 1: the GATE flag is raised at gate - 1, which S passes only
+            # when that is inside the block (a jump lands S on the base).
+            bs = BlockSchedule(b.name, k, max(1, self._block_depth(b)), loads=self.loads, stores=self.stores)
             for st in bs.stores:
                 st.step = bs.gate
             sched.append(bs)

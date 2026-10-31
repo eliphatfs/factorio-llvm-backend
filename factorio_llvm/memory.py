@@ -12,10 +12,10 @@ A read-only array (a constant global) is a ROM: a constant combinator per
 non-zero word on the same kind of private net.
 
 Write. A store is three pulses onto the bus at its block's gate step:
-address as ``A``, value as ``V``, array id as ``E``. Cells update one tick
-after registers would (step gate + 3, the next block's first step). Blocks end
-after each store (see ``frontend.split_after_stores``), so a later load always
-sees it.
+address as ``A``, value as ``V``, array id as ``E``. Cells update when the
+block's registers do. A block is split after a store that is followed by
+another store or by a load of the same array (see
+``frontend.split_after_stores``), so such a load always sees it.
 
 I/O. An ``extern`` array is memory-mapped I/O on two red nets, each with a
 terminal constant combinator (empty, labelled INPUT / OUTPUT) for wiring the
@@ -161,7 +161,6 @@ class Memory:
 
     def build(self, inputs: Net | None, outputs: Net, screen_width: int | None = None) -> None:
         """Place every word and its readers."""
-        s_red = Sig(self.step, frozenset({RED}))
         screen_x = 0
         for bank in self.banks.values():
             a = bank.array
@@ -171,40 +170,11 @@ class Memory:
             for i, init in enumerate(a.init):
                 loop = self.b.nl.net(GREEN, f"{a.name}[{i}]")
                 bank.words.append(loop)
-                if bank.is_input:
-                    assert inputs is not None
-                    pin = Arithmetic(Sig(bank.io[i], frozenset({RED})), "+", 0, VALUE, label=f"{a.name}[{i}] <- {bank.io[i]}")
-                    self.b.place(pin, (), loop, group)
-                    inputs.attach(pin.inp)
+                self._word(bank, i, init, loop, inputs, outputs, group)
+                # Its readers right after it, so its private loop stays short.
+                if a.readonly and not init:
                     continue
-                if a.external:
-                    pin = Arithmetic(Sig(VALUE, frozenset({GREEN})), "+", 0, bank.io[i], label=f"{a.name}[{i}] -> {bank.io[i]}")
-                    self.b.place(pin, (), bank.screen if bank.is_screen else outputs, group)
-                    loop.attach(pin.inp)
-                if a.readonly:
-                    if init:
-                        loop.attach(self.b.place(Constant({VALUE: init}, label=f"{a.name}[{i}]"), (), None, group).out)
-                    continue
-                cell = Decider(
-                    [
-                        Cond(s_red, "<=", 1),
-                        Cond(Sig(ENABLE, frozenset({RED})), "=", -bank.id, join="or"),
-                        Cond(Sig(ENABLE, frozenset({RED})), "=", bank.id, join="or"),
-                        Cond(Sig(ADDRESS, frozenset({RED})), "=", i),
-                    ],
-                    [Out(VALUE, networks=RED)],
-                    [Out(VALUE, networks=GREEN)],
-                    label=f"{a.name}[{i}]",
-                )
-                self.b.place(cell, (RED,), loop, group)
-                loop.attach(cell.inp)
-                if init:
-                    seed = Decider([Cond(s_red, "<=", 1)], [Out(VALUE, copy=False, constant=init)], label=f"{a.name}[{i}] init")
-                    self.b.place(seed, (RED,), loop, group)
-            for j, port in enumerate(bank.ports):
-                for i, loop in enumerate(bank.words):
-                    if a.readonly and not a.init[i]:
-                        continue
+                for j, port in enumerate(bank.ports):
                     reader = Decider(
                         [Cond(Sig(ADDRESS, frozenset({RED})), "=", i)],
                         [Out(VALUE, networks=GREEN)],
@@ -214,6 +184,40 @@ class Memory:
                     port.address.attach(reader.inp)
                     loop.attach(reader.inp)
 
+    def _word(self, bank: _Bank, i: int, init: int, loop: Net, inputs: Net | None, outputs: Net, group: str) -> None:
+        """Place word ``i``'s storage (or its input pin, or ROM constant) on ``loop``."""
+        a = bank.array
+        s_red = Sig(self.step, frozenset({RED}))
+        if bank.is_input:
+            assert inputs is not None
+            pin = Arithmetic(Sig(bank.io[i], frozenset({RED})), "+", 0, VALUE, label=f"{a.name}[{i}] <- {bank.io[i]}")
+            self.b.place(pin, (), loop, group)
+            inputs.attach(pin.inp)
+            return
+        if a.external:
+            pin = Arithmetic(Sig(VALUE, frozenset({GREEN})), "+", 0, bank.io[i], label=f"{a.name}[{i}] -> {bank.io[i]}")
+            self.b.place(pin, (), bank.screen if bank.is_screen else outputs, group)
+            loop.attach(pin.inp)
+        if a.readonly:
+            if init:
+                loop.attach(self.b.place(Constant({VALUE: init}, label=f"{a.name}[{i}]"), (), None, group).out)
+            return
+        cell = Decider(
+            [
+                Cond(s_red, "<=", 1),
+                Cond(Sig(ENABLE, frozenset({RED})), "=", -bank.id, join="or"),
+                Cond(Sig(ENABLE, frozenset({RED})), "=", bank.id, join="or"),
+                Cond(Sig(ADDRESS, frozenset({RED})), "=", i),
+            ],
+            [Out(VALUE, networks=RED)],
+            [Out(VALUE, networks=GREEN)],
+            label=f"{a.name}[{i}]",
+        )
+        self.b.place(cell, (RED,), loop, group)
+        loop.attach(cell.inp)
+        if init:
+            seed = Decider([Cond(s_red, "<=", 1)], [Out(VALUE, copy=False, constant=init)], label=f"{a.name}[{i}] init")
+            self.b.place(seed, (RED,), loop, group)
 
 MAX_SCREEN_ROWS = 16  # two rows of substations power at most this many
 
