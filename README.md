@@ -44,6 +44,7 @@ are placed with the `RESET` constant combinator switched on, which holds `S` at
 1; switch it off to run, and on and off again to rerun with new arguments.
 
 C is compiled with `clang -O2` plus flags that stop vectorisation, unrolling
+(except `#pragma unroll` loops, or every loop with `--unroll N`)
 and closed-form loop exit values (`factorio_llvm.frontend.CLANG_FLAGS`).
 
 M3 supports fixed-size `i32` arrays: local (`alloca`) or global, with or

@@ -82,8 +82,8 @@ def _copy(path: str) -> str:
 
 def test_store_splits_a_block_only_when_needed(build):
     ir, _ = build
-    assert not any(b.name.endswith(".1") for b in lower(read_function(ir, "fill")).schedule.blocks)
-    assert any(b.name.endswith(".1") for b in lower(read_function(ir, "peek")).schedule.blocks)
+    assert not any(b.name.endswith(".part1") for b in lower(read_function(ir, "fill")).schedule.blocks)
+    assert any(b.name.endswith(".part1") for b in lower(read_function(ir, "peek")).schedule.blocks)
 
 
 def test_schedule_shows_memory(build):
@@ -160,3 +160,15 @@ entry:
 """
     c = lower(read_function(ir, "f"))
     assert c.run(5) == 1 and c.run(1000) == 0
+
+
+@pytest.mark.parametrize("unroll", [2, 4, 8])
+def test_unrolled_everywhere(build, unroll):
+    # Unrolling names blocks like if.then.1, which block splitting must not reuse.
+    _, lib_path = build
+    ir = compile_c(EXAMPLE.read_text() + EXTRA, unroll=unroll)
+    for name, gen in CASES:
+        c = lower(read_function(ir, name))
+        rng = random.Random(name)
+        args = gen(rng)
+        assert c.run(*args) == getattr(ctypes.CDLL(_copy(lib_path)), name)(*args), (name, unroll, args)

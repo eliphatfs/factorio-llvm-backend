@@ -84,6 +84,7 @@ class _CfgLowerer(_Lowerer):
         self.io_choice = io or {}
         self.screen_width = screen_width
         self.step = self.b.reserve(STEP)
+        self.reset_signal = self.b.reserve(RESET)
         self.local: dict[int, Lowered] = {}
         self.regs: dict[int, Register] = {}  # value id -> register
         self.def_block: dict[int, str] = {}
@@ -271,7 +272,7 @@ class _CfgLowerer(_Lowerer):
         self.b.place(Arithmetic(Sig(self.step, frozenset({RED})), "+", 0, self.step, label="step counter S"), (RED,), RED)
         # Reset: while this constant is on, S * R = -S cancels the count and S
         # stays at 1. Blueprints are placed with it on; turn it off to run.
-        reset_signal = self.b.reserve(RESET)
+        reset_signal = self.reset_signal
         reset = self.b.place(Constant({reset_signal: -1}, label="RESET: turn off to run"), (), RED)
         self._tag(reset.out, "RESET (turn off to run)", "signal-R")
         self.b.place(

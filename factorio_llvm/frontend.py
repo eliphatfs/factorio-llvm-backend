@@ -251,6 +251,8 @@ def read_function(ir_text: str, name: str | None = None) -> Function:
                 return p
             raise Unsupported(f"pointer {ref}: {where}")
         if ref.is_constant:
+            if str(ref).split()[-1] in ("undef", "poison"):
+                return 0  # any value will do
             if str(ref.type) not in _WIDTHS:
                 raise Unsupported(f"constant of type {ref.type}: {where}")
             v = ref.get_constant_value(signed_int=True)
@@ -431,6 +433,7 @@ def split_after_stores(fn: Function) -> Function:
     successors' phis are told about the part that now ends with the terminator.
     """
     defs = {id(op.result): op for b in fn.blocks for op in b.ops}
+    taken = {b.name for b in fn.blocks}
     renamed: dict[str, str] = {}
     blocks: list[Block] = []
     for b in fn.blocks:
@@ -451,7 +454,11 @@ def split_after_stores(fn: Function) -> Function:
         for op in b.ops:
             if must_split(op):
                 n += 1
-                nxt = Block(f"{b.name}.{n}")
+                name = f"{b.name}.part{n}"
+                while name in taken:  # unrolled loops have names like if.then.1 already
+                    name += "_"
+                taken.add(name)
+                nxt = Block(name)
                 piece.term = Term("br", [nxt.name], text=f"br label %{nxt.name}  ; before {op.text}")
                 blocks.append(piece)
                 piece, written = nxt, []
@@ -482,12 +489,18 @@ CLANG_FLAGS = [
 ]
 
 
-def compile_c(source: str | Path, *, opt: str = "-O2") -> str:
-    """Compile a C file (path) or C source text to LLVM IR text with clang."""
+def compile_c(source: str | Path, *, opt: str = "-O2", unroll: int = 1) -> str:
+    """Compile a C file (path) or C source text to LLVM IR text with clang.
+
+    ``unroll`` > 1 unrolls every loop that many times (``-unroll-count``);
+    otherwise only loops with ``#pragma unroll`` are unrolled."""
     clang = shutil.which("clang")
     if clang is None:
         raise RuntimeError("clang not found on PATH")
-    base = [clang, opt, *CLANG_FLAGS, "-S", "-emit-llvm", "-fno-discard-value-names", "-o", "-"]
+    flags = CLANG_FLAGS
+    if unroll > 1:
+        flags = [f for f in CLANG_FLAGS if f != "-fno-unroll-loops"] + ["-funroll-loops", "-mllvm", f"-unroll-count={unroll}"]
+    base = [clang, opt, *flags, "-S", "-emit-llvm", "-fno-discard-value-names", "-o", "-"]
     if isinstance(source, Path) or (isinstance(source, str) and source.endswith(".c") and Path(source).exists()):
         return subprocess.run([*base, str(source)], check=True, capture_output=True, text=True).stdout
     return subprocess.run([*base, "-x", "c", "-"], input=source, check=True, capture_output=True, text=True).stdout
