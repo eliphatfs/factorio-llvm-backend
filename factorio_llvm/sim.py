@@ -12,6 +12,7 @@ Edge cases were checked in game (Factorio 2.1) with examples/calibrate.py.
 
 from __future__ import annotations
 
+import operator
 from collections import defaultdict
 from typing import Iterable, Mapping
 
@@ -182,6 +183,9 @@ def _emit(outs: list[Out], inp: _Inputs, out: defaultdict[str, int], each: str |
 def eval_decider(c: Decider, inp: _Inputs) -> Signals:
     out: defaultdict[str, int] = defaultdict(int)
     if c.each_condition:
+        fast = _each_fast(c, inp)
+        if fast is not None:
+            return fast
         nets: set[Color] = set()
         for cond in c.conditions:
             if cond.left.name == EACH:
@@ -195,11 +199,57 @@ def eval_decider(c: Decider, inp: _Inputs) -> Signals:
     return _finish(out)
 
 
+_CMP = {"<": operator.lt, ">": operator.gt, "=": operator.eq, "!=": operator.ne, "<=": operator.le, ">=": operator.ge}
+
+
+def _each_fast(c: Decider, inp: _Inputs) -> Signals | None:
+    """Each conditions of the form ``each <cmp> X`` without else outputs (what
+    memory uses): evaluate the other conditions once, then filter the input
+    signals by value instead of re-evaluating the whole expression per signal.
+    None when the decider does not have that shape."""
+    if c.else_outputs:
+        return None
+    groups: list[list[Cond]] = [[]]
+    for i, cond in enumerate(c.conditions):
+        if i > 0 and cond.join == "or":
+            groups.append([])
+        groups[-1].append(cond)
+    nets: set[Color] = set()
+    for cond in c.conditions:
+        if isinstance(cond.right, Sig) and cond.right.name == EACH:
+            return None
+        if cond.left.name == EACH:
+            nets |= cond.left.networks
+    if any(cond.left.name in (ANYTHING, EVERYTHING) for cond in c.conditions):
+        return None
+    names = inp.signals(nets)
+    passed: set[str] = set()
+    for g in groups:
+        if not all(_cond_true(x, inp, None) for x in g if x.left.name != EACH):
+            continue
+        cand = names
+        for x in g:
+            if x.left.name == EACH:
+                right, f = inp.operand(x.right), _CMP[x.cmp]
+                cand = [s for s in cand if f(inp.get(s, x.left.networks), right)]
+        passed.update(cand)
+    out: defaultdict[str, int] = defaultdict(int)
+    for s in names:
+        if s in passed:
+            _emit(c.outputs, inp, out, s)
+    return _finish(out)
+
+
 class Simulator:
     def __init__(self, netlist: Netlist) -> None:
         self.netlist = netlist
         self.net_of = netlist.nets()
         self.outputs: dict[int, Signals] = {id(e): {} for e in netlist.entities}
+        # Only these ever drive a wire; lamps, poles, panels and gates do not.
+        self._drivers = [e for e in netlist.entities if isinstance(e, (Arithmetic, Decider, Wall, Constant))]
+        for e in netlist.entities:
+            if not isinstance(e, (Arithmetic, Decider, Wall, Constant, Pole, Lamp, Panel, Gate)):
+                raise TypeError(f"cannot simulate {type(e).__name__}")
         self.tick = 0
         self._nets = self._compute_nets()
 
@@ -212,7 +262,7 @@ class Simulator:
 
     def _compute_nets(self) -> dict[int, Signals]:
         nets: dict[int, defaultdict[str, int]] = defaultdict(lambda: defaultdict(int))
-        for e in self.netlist.entities:
+        for e in self._drivers:
             sigs = self._entity_output(e)
             if not sigs:
                 continue
@@ -237,18 +287,14 @@ class Simulator:
         for _ in range(ticks):
             # Recompute first so edits to constant combinators count this tick.
             self._nets = self._compute_nets()
-            new: dict[int, Signals] = {}
-            for e in self.netlist.entities:
+            new: dict[int, Signals] = dict(self.outputs)
+            for e in self._drivers:
                 if isinstance(e, Arithmetic):
                     new[id(e)] = eval_arithmetic(e, self._inputs(e))
                 elif isinstance(e, Decider):
                     new[id(e)] = eval_decider(e, self._inputs(e))
                 elif isinstance(e, Wall):
                     new[id(e)] = {e.sensor: 1} if e.pressed and e.sensor else {}
-                elif isinstance(e, (Constant, Pole, Lamp, Panel, Gate)):
-                    new[id(e)] = {}
-                else:
-                    raise TypeError(f"cannot simulate {type(e).__name__}")
             self.outputs = new
             self.tick += 1
             self._nets = self._compute_nets()

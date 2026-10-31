@@ -52,6 +52,21 @@ python -c "import llvmlite.binding as l; print(l.llvm_version_info)"
 On Linux, `apt install clang`; on macOS, the Xcode clang works (Apple clang
 15+); on Windows, install LLVM from llvm.org and put `clang` on `PATH`.
 
+A joystick read can see the cage change in the middle of a block, and values
+computed from it in that block can then mix old and new state (in the
+simulator, a move from S straight to N could put the position at 0). Until reads
+are latched, copy `joystick[]` into a `volatile` array first and compute from
+the copy, as `examples/factory.c` does.
+
+`examples/factory.c` is a small factory game on a 256x192 screen (32x24 tiles):
+a chest of plates, an inserter, belts and an engineer you walk with the
+joystick, placing belts and inserters from a toolbar. It is about 6,200
+combinators plus the lamps. Drawing a tile costs about 70 ticks, so the first
+full screen takes about 54,000 ticks (15 minutes) and a frame then takes about
+500 to 900 ticks, depending on how many tiles change. Build it with
+`python -m factorio_llvm examples/factory.c -f game --args 1000000000 --no-sim`
+(`--no-sim` bakes the arguments in without simulating).
+
 ## Usage
 
 ```
