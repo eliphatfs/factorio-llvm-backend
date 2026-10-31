@@ -125,15 +125,17 @@ static const int sprites[576] = {
     0xe02020, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0xe02020,
 };
 
-int kind[NT];   /* EMPTY / CHEST / BELT / INSERTER */
-int dir[NT];    /* 0 east, 1 south, 2 west, 3 north */
-int item[NT];   /* a plate on this belt, or in this inserter's hand */
-int moved[NT];  /* frame in which a plate arrived here (moves once a frame) */
-int slot[NT];   /* index of this tile in its list */
-int marked[NT]; /* frame in which this tile was queued for redraw */
+#define OFF NT    /* a tile index past the field: always EMPTY */
+int kind[NT + 1];   /* EMPTY / CHEST / BELT / INSERTER (or a toolbar kind) */
+int dir[NT];        /* 0 east, 1 south, 2 west, 3 north */
+int item[NT + 1];   /* a plate on this belt, or in this inserter's hand */
+int moved[NT + 1];  /* frame in which a plate arrived here (moves once a frame) */
+int slot[NT];       /* index of this tile in its list */
+int ahead[NT];      /* the tile this belt or inserter faces, or OFF */
+int behind[NT];     /* the tile behind it, or OFF */
 int lists[2 * MAXE]; /* belts, then inserters */
 int count[2];        /* how many belts, inserters */
-int dirty[NT];
+int dirty[2 * NT]; /* tiles to redraw this frame (setup queues all of them) */
 int ndirty, frame;
 extern volatile int walk[1], hold[1]; /* the two input terminals */
 volatile int input[2]; /* this frame's inputs, copied once (see read_input) */
@@ -156,12 +158,9 @@ static inline void read_input(int *w, int *h) {
 static inline int step_x(int d) { return (d == 0) - (d == 2); }
 static inline int step_y(int d) { return (d == 1) - (d == 3); }
 
-static inline void mark(int t) {
-    if (marked[t] != frame) {
-        marked[t] = frame;
-        dirty[ndirty++] = t;
-    }
-}
+/* Queue tile t for redraw. A tile queued twice is drawn twice (24 ticks),
+   which is cheaper than checking for it on every mark. */
+static inline void mark(int t) { dirty[ndirty++] = t; }
 
 /* Belts are list 0 and inserters list 1 of one array (the compiler wants
    every pointer to stay inside one array). */
@@ -176,6 +175,12 @@ static inline void unlist(int t) {
 }
 
 /* Put `k` (BELT, INSERTER or EMPTY) facing `d` on tile t. */
+/* The tile next to t in direction d, or OFF past the edge of the field. */
+static inline int neighbour(int t, int d) {
+    int x = (t & (TW - 1)) + step_x(d), y = t / TW + step_y(d);
+    return x >= 0 && x < TW && y >= 0 && y < TH - 1 ? y * TW + x : OFF;
+}
+
 static inline void build(int t, int k, int d) {
     int old = kind[t];
     if (old == CHEST) return;
@@ -192,6 +197,8 @@ static inline void build(int t, int k, int d) {
         item[t] = 0;
     }
     dir[t] = d;
+    ahead[t] = neighbour(t, d);
+    behind[t] = neighbour(t, (d + 2) & 3);
     mark(t);
 }
 
@@ -260,36 +267,30 @@ int game(int frames) {
 
         /* 2. inserters: grab from behind, drop in front */
         for (int i = 0; i < count[1]; i++) {
-            int t = lists[MAXE + i], d = dir[t];
-            int ddx = step_x(d), ddy = step_y(d);
-            int tx = t & (TW - 1), ty = t / TW;
-            int sx = tx - ddx, sy = ty - ddy, fx = tx + ddx, fy = ty + ddy;
+            int t = lists[MAXE + i];
             if (!item[t]) {
                 /* grab every third frame: plates 3 tiles apart read clearly as
                    moving forward (2 apart, a step forward looks like a step back) */
-                if (frame % 3 == 0 && sx >= 0 && sx < TW && sy >= 0 && sy < TH - 1) {
-                    int s = sy * TW + sx, k = kind[s];
-                    if (k == CHEST) {
-                        item[t] = 1;
-                        mark(t);
-                    } else if (k == BELT && item[s]) {
+                int s = behind[t], k = kind[s];
+                if (frame % 3 == 0 && (k == CHEST || (k == BELT && item[s]))) {
+                    if (k == BELT) {
                         item[s] = 0;
-                        item[t] = 1;
                         mark(s);
-                        mark(t);
                     }
-                }
-            } else if (fx >= 0 && fx < TW && fy >= 0 && fy < TH - 1) {
-                int f = fy * TW + fx, k = kind[f];
-                if (k == CHEST) {
-                    item[t] = 0;
-                    delivered++;
+                    item[t] = 1;
                     mark(t);
-                } else if (k == BELT && !item[f]) {
-                    item[f] = 1;
-                    moved[f] = frame;
+                }
+            } else {
+                int f = ahead[t], k = kind[f];
+                if (k == CHEST || (k == BELT && !item[f])) {
+                    if (k == CHEST) {
+                        delivered++;
+                    } else {
+                        item[f] = 1;
+                        moved[f] = frame;
+                        mark(f);
+                    }
                     item[t] = 0;
-                    mark(f);
                     mark(t);
                 }
             }
@@ -299,20 +300,16 @@ int game(int frames) {
         for (int i = 0; i < count[0]; i++) {
             int t = lists[i];
             if (item[t] && moved[t] != frame) {
-                int d = dir[t];
-                int fx = (t & (TW - 1)) + step_x(d), fy = (t / TW) + step_y(d);
-                if (fx >= 0 && fx < TW && fy >= 0 && fy < TH - 1) {
-                    int f = fy * TW + fx, k = kind[f];
-                    if (k == CHEST || (k == BELT && !item[f])) {
-                        item[t] = 0;
-                        mark(t);
-                        if (k == CHEST) {
-                            delivered++;
-                        } else {
-                            item[f] = 1;
-                            moved[f] = frame;
-                            mark(f);
-                        }
+                int f = ahead[t], k = kind[f];
+                if (k == CHEST || (k == BELT && !item[f])) {
+                    item[t] = 0;
+                    mark(t);
+                    if (k == CHEST) {
+                        delivered++;
+                    } else {
+                        item[f] = 1;
+                        moved[f] = frame;
+                        mark(f);
                     }
                 }
             }
