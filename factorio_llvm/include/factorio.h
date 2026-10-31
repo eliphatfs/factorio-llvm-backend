@@ -33,10 +33,10 @@ extern volatile int joystick[8];
 
 /* -1, 0 or 1: x grows to the right, y grows downwards (like the screen). */
 static inline int joy_dx(void) {
-    return (joystick[JOY_E] | joystick[JOY_NE] | joystick[JOY_SE]) - (joystick[JOY_W] | joystick[JOY_NW] | joystick[JOY_SW]);
+    return ((joystick[JOY_E] | joystick[JOY_NE] | joystick[JOY_SE]) != 0) - ((joystick[JOY_W] | joystick[JOY_NW] | joystick[JOY_SW]) != 0);
 }
 static inline int joy_dy(void) {
-    return (joystick[JOY_S] | joystick[JOY_SE] | joystick[JOY_SW]) - (joystick[JOY_N] | joystick[JOY_NE] | joystick[JOY_NW]);
+    return ((joystick[JOY_S] | joystick[JOY_SE] | joystick[JOY_SW]) != 0) - ((joystick[JOY_N] | joystick[JOY_NE] | joystick[JOY_NW]) != 0);
 }
 
 /* A lamp colour from 0..255 channels. */

@@ -14,7 +14,7 @@ from typing import Iterable, TypeVar
 
 from .frontend import Function, Op, Operand, Unsupported, Value
 from .fuse import (
-    Bool, Lin, Pieces, TooBig, atom, band, bnot, bor, cases_of, lin_add, lin_of, lin_scale, pieces, simple, unsigned_atom,
+    MAX_TERMS, Bool, Lin, Ors, Pieces, TooBig, atom, band, bnot, bor, cases_of, lin_add, lin_of, lin_scale, pieces, simple, unsigned_atom,
 )
 from .signals import rich_text
 from .netlist import GREEN, RED, Arithmetic, Color, Cond, Connector, Constant, Decider, Entity, Message, Net, Netlist, Out, Panel, Sig
@@ -181,10 +181,10 @@ class _Lowerer:
     def real(self, x):
         if isinstance(x, bool):
             return int(x)
-        if not isinstance(x, (Lin, Bool, Pieces)):
+        if not isinstance(x, (Lin, Bool, Pieces, Ors)):
             return x
         if x.memo is None:
-            x.memo = self._place_lin(x) if isinstance(x, Lin) else self._place_bool(x) if isinstance(x, Bool) else self._place_pieces(x)
+            x.memo = self._place_ors(x) if isinstance(x, Ors) else self._place_lin(x) if isinstance(x, Lin) else self._place_bool(x) if isinstance(x, Bool) else self._place_pieces(x)
         return x.memo
 
     def _lin(self, x) -> Lin:
@@ -232,6 +232,12 @@ class _Lowerer:
                 self.b.place(Constant({out: k}, label=f"{label} (+ {k})"), (), GREEN)
         return Wire(out, _depth(*x.terms) + 1)
 
+    def _place_ors(self, x: Ors) -> Wire:
+        level: list[Lowered] = list(x.parts)
+        while len(level) > 1:  # a balanced tree of ORs
+            level = [self.arith("OR", level[i], level[i + 1], "or") if i + 1 < len(level) else level[i] for i in range(0, len(level), 2)]
+        return level[0]
+
     def _place_bool(self, x: Bool) -> Wire:
         out = self.b.local_signal()
         leaves = self._leaves(x)
@@ -273,7 +279,7 @@ class _Lowerer:
     def lazy_op(self, op: Op):
         """``op`` as a lazy form, or NotImplemented to place it the plain way."""
         raw = [self.get_raw(a) for a in op.args]
-        if not all(isinstance(x, (int, Wire, Lin, Bool, Pieces)) for x in raw):
+        if not all(isinstance(x, (int, Wire, Lin, Bool, Pieces, Ors)) for x in raw):
             return NotImplemented
         try:
             r = self._lazy(op, raw)
@@ -306,6 +312,8 @@ class _Lowerer:
         widths = [a.width if isinstance(a, Value) else None for a in op.args]
         if opc in ("zext", "freeze") or (opc in ("trunc", "sext") and widths[0] == w):
             return raw[0]
+        if opc == "sext" and widths[0] == 1:  # i1 true is -1
+            return lin_scale(self._lin(raw[0]), -1)
         if w == 1 and opc in ("and", "or", "xor"):
             a, b = (self._boolish(x) for x in raw)
             if opc == "and":
@@ -313,9 +321,21 @@ class _Lowerer:
             if opc == "or":
                 return bor(a, b)
             return bor(band(a, bnot(b)), band(bnot(a), b))
+        if w > 1 and opc == "or" and " or disjoint " not in f" {op.text} " and not any(isinstance(x, int) for x in raw):
+            parts = [p for x in raw for p in (x.parts if isinstance(x, Ors) else [self.real(x)])]
+            if len(parts) > MAX_TERMS:
+                raise TooBig
+            return Ors(parts)
         if opc == "icmp":
             pred = op.predicate or ""
             a, b = raw
+            if pred in ("eq", "ne") and isinstance(a, Ors) and b == 0:
+                # x | y | z != 0 is x != 0 || y != 0 || z != 0
+                tests = [atom(p, "!=", 0) for p in a.parts]
+                any_set = tests[0]
+                for t in tests[1:]:
+                    any_set = bor(any_set, t)
+                return any_set if pred == "ne" else bnot(any_set)
             if widths[0] == 1:
                 if pred not in ("eq", "ne"):
                     return NotImplemented

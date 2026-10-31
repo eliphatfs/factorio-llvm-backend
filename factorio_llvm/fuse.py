@@ -78,7 +78,15 @@ class Pieces:
     memo: "Wire | None" = None
 
 
-Lazy = Union[Lin, Bool, Pieces]
+@dataclass(eq=False)
+class Ors:
+    """A bitwise OR of wires, kept whole so ``x != 0`` can test each part."""
+
+    parts: list["Wire"]
+    memo: "Wire | None" = None
+
+
+Lazy = Union[Lin, Bool, Pieces, Ors]
 
 
 class TooBig(Exception):
