@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from .frontend import Array, Block, Function, Op, Operand, Unsupported, Value
 from .lower import GATE, PRIVATE_CONSTANT, Lowered, Wire, _Builder, _colors, _depth, _Lowerer, _operand
 from .netlist import GREEN, RED, Arithmetic, Cond, Connector, Constant, Decider, Message, Net, Netlist, Out, Panel, Sig
-from .memory import ADDRESS, ENABLE, VALUE, Memory, Ptr
+from .memory import ADDRESS, Memory, Ptr
 from .schedule import GATE_TO_LATCH, BlockSchedule, Jump, Load, Register, Schedule, Store, Test, Write
 from .signals import EACH
 from .sim import Simulator, wrap
@@ -126,17 +126,19 @@ class _CfgLowerer(_Lowerer):
                 raise Unsupported(f"storing a pointer: {op.text}")
             if ptr.array.readonly:
                 raise Unsupported(f"store to a constant: {op.text}")
-            bank = self.mem.bank(ptr.array)
-            bank.stored = True
+            port = len(self.stores)
+            self.mem.write_port(ptr.array, port)
             names = (_name(op.args[1]), _name(op.args[0]))
-            self.stores.append(Store(0, ptr.array.name, bank.id, ptr.index, value, sources=names))
+            st = Store(0, ptr.array.name, self.mem.bank(ptr.array).id, ptr.index, value, sources=names, port=port)
+            self.stores.append(st)
             return 0
         if op.opcode == "clear":
             assert self.mem is not None
             arr = op.args[0]
             assert isinstance(arr, Array)
-            self.mem.bank(arr).stored = True
-            self.stores.append(Store(0, arr.name, self.mem.bank(arr).id, clear=True))
+            port = len(self.stores)
+            self.mem.write_port(arr, port)
+            self.stores.append(Store(0, arr.name, self.mem.bank(arr).id, clear=True, port=port))
             return 0
         return super().op(op)
 
@@ -229,12 +231,14 @@ class _CfgLowerer(_Lowerer):
         self._gated(w.step, w.value, w.register.signal, self.writes, f"{w.label} (write at {w.step})")
 
     def _emit_store(self, st: Store) -> None:
+        assert self.mem is not None
+        sig_a, sig_v, sig_e = self.mem.write_signals[st.port]
         if st.clear:
-            self._gated(st.step, -st.array_id, ENABLE, self.b.bus, f"clear {st.array}")
+            self._gated(st.step, -st.array_id, sig_e, self.b.bus, f"clear {st.array}")
             return
         label = f"store {st.array} at {st.step}"
         # The address goes out as address + 1 (see memory.py): a second pulse adds the 1.
-        for v, sig in ((st.address, ADDRESS), (1, ADDRESS), (st.value, VALUE), (st.array_id, ENABLE)):
+        for v, sig in ((st.address, sig_a), (1, sig_a), (st.value, sig_v), (st.array_id, sig_e)):
             if v != 0:
                 self._gated(st.step, v, sig, self.b.bus, f"{label} ({sig})")
 

@@ -22,12 +22,17 @@ A read-only array (a constant global) is a ROM: one constant combinator per
 chunk with the non-zero words, as its loop.
 
 Write. A store pulses the bus at its block's gate step: address + 1 as ``A``
-(two pulses, the address and a 1), value as ``V``, array id as ``E``. The word
-is on the loop three ticks later, before the next block can read it. A block
-is split after a store that is followed by another store or by a load of the
-same array (see ``frontend.split_after_stores``).
+(two pulses, the address and a 1), value as ``V``, array id as ``E``. The
+``k``-th store of a block uses write port ``k``: port 0 is ``A``/``V``/``E``,
+later ports get bus signals of their own, and each chunk the port writes has
+its own mask, delayed value and writer (with several ports, a second copy of
+each mask feeds the cell). The word is on the loop three ticks later, before
+the next block can read it. ``frontend.split_after_stores`` ends a block
+before a load of an array it wrote, and before a store that may hit a word it
+wrote: two stores share a block only if their addresses differ by a constant.
 
-Read port. Port ``j`` of an array has an address net (``A`` = address + 1) and
+Read port. Port ``j`` of an array has an address net (red for even ports,
+green for odd ones) (``A`` = address + 1) and
 a result net. Per chunk it has a *read mask* (``each(key) == A`` -> each = 1)
 and a *reader*: for the masked signal, output its loop value as ``V`` onto the
 result net (only one chunk matches). A load drives the address net only while
@@ -55,7 +60,7 @@ from dataclasses import dataclass, field
 from .frontend import Array
 from .frontend import Unsupported
 from .lower import Lowered, Wire, _Builder
-from .netlist import GREEN, RED, Arithmetic, Cond, Constant, Decider, Lamp, Net, Out, Sig
+from .netlist import GREEN, RED, Color, Arithmetic, Cond, Constant, Decider, Lamp, Net, Out, Sig
 from .signals import EACH, allocatable_signals
 
 ADDRESS = "signal-A"
@@ -86,6 +91,7 @@ class _Bank:
     loops: list[Net] = field(default_factory=list)  # each chunk's words
     ports: list[_Port] = field(default_factory=list)
     stored: bool = False  # the program writes to it
+    write_ports: set[int] = field(default_factory=set)  # bus write ports its stores use
     io: list[str] = field(default_factory=list)  # external arrays: signal per word
 
     @property
@@ -108,7 +114,19 @@ class Memory:
         self.step = step
         for s in (ADDRESS, VALUE, ENABLE):
             b.reserve(s)
+        # Bus signals (address + 1, value, enable) of each write port: one per
+        # store in a block, so a block's stores go out together.
+        self.write_signals: list[tuple[str, str, str]] = [(ADDRESS, VALUE, ENABLE)]
         self.banks = {id(a): _Bank(a, i + 1) for i, a in enumerate(arrays)}
+
+    def write_port(self, a: Array, p: int) -> tuple[str, str, str]:
+        """The bus signals of write port ``p``, which ``a`` is stored through."""
+        while len(self.write_signals) <= p:
+            self.write_signals.append((self.b.signal(), self.b.signal(), self.b.signal()))
+        bank = self.bank(a)
+        bank.stored = True
+        bank.write_ports.add(p)
+        return self.write_signals[p]
 
     def bank(self, a: Array) -> _Bank:
         return self.banks[id(a)]
@@ -117,15 +135,18 @@ class Memory:
         bank = self.bank(a)
         while len(bank.ports) <= j:
             n = len(bank.ports)
-            bank.ports.append(_Port(self.b.nl.net(RED, f"{a.name} port {n} address"), self.b.nl.net(RED, f"{a.name} port {n} data")))
+            # Ports alternate colours, so their long nets share the substations.
+            color = RED if n % 2 == 0 else GREEN
+            bank.ports.append(_Port(self.b.nl.net(color, f"{a.name} port {n} address"), self.b.nl.net(color, f"{a.name} port {n} data")))
         return bank.ports[j]
 
     def load_result(self, a: Array, j: int, address: Lowered, label: str) -> Wire:
         """The block-local copy of port ``j``'s data (placed in the current block)."""
         out = self.b.local_signal()
-        rename = Arithmetic(Sig(VALUE, frozenset({RED})), "+", 0, out, label=f"{label} (data)")
+        result = self.port(a, j).result
+        rename = Arithmetic(Sig(VALUE, frozenset({result.color})), "+", 0, out, label=f"{label} (data)")
         self.b.place(rename, (), GREEN)
-        self.port(a, j).result.attach(rename.inp)
+        result.attach(rename.inp)
         return Wire(out, _depth_of(address) + LOAD_LATENCY)
 
     def assign_io(self, chosen: dict[str, list[str]], taken_on_output: set[str]) -> dict[str, list[str]]:
@@ -180,22 +201,27 @@ class Memory:
                 words = list(zip(sigs, a.init[base : base + CHUNK]))
                 loop = self.b.nl.net(GREEN, f"{a.name}[{base}..]")
                 bank.loops.append(loop)
-                key_net = self._chunk(bank, base, words, loop, inputs, outputs, group)
+                self._chunk(bank, base, words, loop, inputs, outputs, group)
                 if bank.is_screen:
                     screen_x = self._screen(bank, loop, screen_width, screen_x)
-                for j, port in enumerate(bank.ports):
-                    self._reader(bank, base, j, port, key_net, loop, group)
+            # Readers port by port, each with its own copy of the chunk's key,
+            # so a port's nets stay short and only the chunk loops reach across.
+            for j, port in enumerate(bank.ports):
+                for c, base in enumerate(range(0, a.size, CHUNK)):
+                    words = list(zip(sigs, a.init[base : base + CHUNK]))
+                    key_net = self._key(a, base, words, group, GREEN if port.address.color == RED else RED)
+                    self._reader(bank, base, j, port, key_net, bank.loops[c], group)
 
-    def _key(self, a: Array, base: int, words: list[tuple[str, int]], group: str) -> Net:
-        net = self.b.nl.net(GREEN, f"{a.name}[{base}..] key")
+    def _key(self, a: Array, base: int, words: list[tuple[str, int]], group: str, color: Color = GREEN) -> Net:
+        net = self.b.nl.net(color, f"{a.name}[{base}..] key")
         key = Constant({s: base + k + 1 for k, (s, _) in enumerate(words)}, label=f"{a.name}[{base}..] addresses + 1")
         net.attach(self.b.place(key, (), None, group).out)
         return net
 
     def _chunk(
         self, bank: _Bank, base: int, words: list[tuple[str, int]], loop: Net, inputs: Net | None, outputs: Net, group: str
-    ) -> Net:
-        """Place one chunk's storage (or input copy, or ROM constant) on ``loop``; return its key net."""
+    ) -> None:
+        """Place one chunk's storage (or input copy, or ROM constant) on ``loop``."""
         a = bank.array
         name = f"{a.name}[{base}..]"
         s_red = Sig(self.step, frozenset({RED}))
@@ -204,33 +230,39 @@ class Memory:
             copy = Arithmetic(Sig(EACH, frozenset({RED})), "+", 0, EACH, label=f"{name} <- INPUT")
             self.b.place(copy, (), loop, group)
             inputs.attach(copy.inp)
-            return self._key(a, base, words, group)
+            return
         if a.readonly:
             rom = {s: v for s, v in words if v}
             if rom:
                 loop.attach(self.b.place(Constant(rom, label=name), (), None, group).out)
-            return self._key(a, base, words, group) if bank.ports else loop
+            return
         key_net = self._key(a, base, words, group)
         mask = self.b.nl.net(RED, f"{name} write mask")
-        e = Sig(ENABLE, frozenset({RED}))
-        write_mask = Decider(
-            [
-                Cond(Sig(EACH, frozenset({GREEN})), "=", Sig(ADDRESS, frozenset({RED}))),
+        ports = sorted(bank.write_ports | {0})
+        for p in ports:
+            sig_a, sig_v, sig_e = self.write_signals[p]
+            e = Sig(sig_e, frozenset({RED}))
+            conds = [
+                Cond(Sig(EACH, frozenset({GREEN})), "=", Sig(sig_a, frozenset({RED}))),
                 Cond(e, "=", bank.id),
                 Cond(e, "=", -bank.id, join="or"),
-                Cond(s_red, "<=", 1, join="or"),
-            ],
-            [Out(EACH, copy=False, constant=1)],
-            label=f"{name} write mask",
-        )
-        self.b.place(write_mask, (RED,), mask, group)
-        key_net.attach(write_mask.inp)
-        delayed = self.b.nl.net(GREEN, f"{name} value")
-        self.b.place(Arithmetic(Sig(VALUE, frozenset({RED})), "+", 0, VALUE, label=f"{name} value (delay)"), (RED,), delayed, group)
-        writer = Arithmetic(Sig(EACH, frozenset({RED})), "*", Sig(VALUE, frozenset({GREEN})), EACH, label=f"{name} writer")
-        self.b.place(writer, (), loop, group)
-        mask.attach(writer.inp)
-        delayed.attach(writer.inp)
+            ]
+            if p == 0:
+                conds.append(Cond(s_red, "<=", 1, join="or"))
+            # The cell reads every port's mask on one net; with several ports,
+            # each writer needs its own copy.
+            own = mask if len(ports) == 1 else self.b.nl.net(RED, f"{name} write mask {p}")
+            for net in {id(mask): mask, id(own): own}.values():
+                write_mask = Decider(conds, [Out(EACH, copy=False, constant=1)], label=f"{name} write mask {p}")
+                self.b.place(write_mask, (RED,), net, group)
+                key_net.attach(write_mask.inp)
+            delayed = self.b.nl.net(GREEN, f"{name} value {p}")
+            delay = Arithmetic(Sig(sig_v, frozenset({RED})), "+", 0, VALUE, label=f"{name} value {p} (delay)")
+            self.b.place(delay, (RED,), delayed, group)
+            writer = Arithmetic(Sig(EACH, frozenset({RED})), "*", Sig(VALUE, frozenset({GREEN})), EACH, label=f"{name} writer {p}")
+            self.b.place(writer, (), loop, group)
+            own.attach(writer.inp)
+            delayed.attach(writer.inp)
         cell = Decider(
             [Cond(Sig(EACH, frozenset({GREEN})), "!=", 0), Cond(Sig(EACH, frozenset({RED})), "=", 0)],
             [Out(EACH, networks=GREEN)],
@@ -246,13 +278,12 @@ class Memory:
             pin = Arithmetic(Sig(EACH, frozenset({GREEN})), "+", 0, EACH, label=f"{name} -> OUTPUT")
             self.b.place(pin, (), outputs, group)
             loop.attach(pin.inp)
-        return key_net
 
     def _reader(self, bank: _Bank, base: int, j: int, port: _Port, key_net: Net, loop: Net, group: str) -> None:
         name = f"{bank.array.name}[{base}..] port {j}"
         mask = self.b.nl.net(RED, f"{name} mask")
         pick = Decider(
-            [Cond(Sig(EACH, frozenset({GREEN})), "=", Sig(ADDRESS, frozenset({RED})))],
+            [Cond(Sig(EACH, frozenset({key_net.color})), "=", Sig(ADDRESS, frozenset({port.address.color})))],
             [Out(EACH, copy=False, constant=1)],
             label=f"{name} mask",
         )
