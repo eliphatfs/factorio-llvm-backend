@@ -369,10 +369,19 @@ class _CfgLowerer(_Lowerer):
         inputs, in_terminal, io = None, None, {}
         if self.mem is not None:
             io = self.mem.assign_io(self.io_choice, {result.signal, DONE})
-            if any(bank.is_input for bank in self.mem.banks.values()):
+            banks = list(self.mem.banks.values())
+            ins = [b for b in banks if b.is_input]
+            if ins:
+                # Every input word starts at 0 here: set it in the terminal, or
+                # wire the factory to it.
                 inputs = self.b.nl.net(RED, "INPUT")
-                in_terminal = self.b.place(Constant({}, label="INPUT: wire the factory here"), (), inputs)
+                zeros = {sig: 0 for b in ins for sig in b.io}
+                label = "INPUT: wire the factory here, or set values here.\n" + _io_lines(ins)
+                in_terminal = self.b.place(Constant(zeros, label=label), (), inputs)
                 self._tag(in_terminal.out, "INPUT", "signal-I")
+            outs = [b for b in banks if b.array.external and not b.is_input and not b.is_screen]
+            if outs:
+                out_terminal.label += "\n" + _io_lines(outs)
             self.mem.build(inputs, output, self.screen_width)
         unknown = set(self.io_choice) - set(io)
         if unknown:
@@ -461,6 +470,11 @@ class _CfgLowerer(_Lowerer):
             go(t.targets[0], [Test(c, "!=", val, _name(t.cond)) for val, _ in t.cases], " (default)")
         else:
             raise Unsupported(f"terminator {t.kind}")
+
+
+def _io_lines(banks) -> str:
+    """One description line per word: ``@in[0] = <icon>``."""
+    return "\n".join(f"@{b.array.name}[{i}] = {rich_text(sig)}" for b in banks for i, sig in enumerate(b.io))
 
 
 def _name(v: Operand) -> str:
