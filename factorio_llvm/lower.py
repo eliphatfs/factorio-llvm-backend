@@ -14,7 +14,7 @@ from typing import Iterable, TypeVar
 
 from .frontend import Function, Op, Operand, Unsupported, Value
 from .fuse import (
-    MAX_TERMS, Bool, Lin, Ors, Pieces, TooBig, atom, band, bnot, bor, cases_of, lin_add, lin_of, lin_scale, pieces, simple, unsigned_atom,
+    MAX_TERMS, Atom, Bool, Lin, Ors, Pieces, TooBig, atom, band, bnot, bor, cases_of, lin_add, lin_of, lin_scale, pieces, simple, unsigned_atom,
 )
 from .signals import rich_text
 from .netlist import GREEN, RED, Arithmetic, Color, Cond, Connector, Constant, Decider, Entity, Message, Net, Netlist, Out, Panel, Sig
@@ -57,6 +57,7 @@ class Wire:
     color: Color = GREEN
     early: int | None = None  # ticks along the shortest path from a changing input (None: = depth)
     vary: int | None = None  # ticks along the longest path from a changing input (None: = depth)
+    reads: tuple = ()  # (array, lo, hi): memory read between lo and hi ticks before this value
 
     @property
     def lo(self) -> int:
@@ -181,6 +182,17 @@ def _early(*vs: Lowered) -> int:
     return min((v.lo for v in vs if isinstance(v, Wire)), default=STABLE)
 
 
+def _reads(*vs: Lowered, lo: int, hi: int | None = None) -> tuple:
+    """The memory reads behind ``vs``, ``lo`` (to ``hi``) ticks further on."""
+    hi = lo if hi is None else hi
+    out: dict[str, tuple[int, int]] = {}
+    for v in vs:
+        for a, x, y in v.reads if isinstance(v, Wire) else ():
+            px, py = out.get(a, (x, y))
+            out[a] = (min(px, x), max(py, y))
+    return tuple((a, x + lo, y + hi) for a, (x, y) in sorted(out.items()))
+
+
 def _vary(*vs: Lowered) -> int:
     """The latest a change of the block's inputs can reach any of ``vs``."""
     return max((v.hi for v in vs if isinstance(v, Wire) and v.lo < STABLE), default=-STABLE)
@@ -191,6 +203,11 @@ class _Lowerer:
         self.fn = fn
         self.b = _Builder()
         self.env: dict[int, Lowered] = {}
+        # Balance: delay the operands of every combinator so that all paths
+        # from a changing input reach it at once (early == vary), for loops
+        # whose iterations will overlap (cfg.py).
+        self.balance = False
+        self._delays: dict[tuple[int, str, object, int], Wire] = {}
         self.names: dict[str, str] = {}
 
     def get_raw(self, a: Operand):
@@ -229,6 +246,35 @@ class _Lowerer:
     def _caseable(self, x):
         return x if isinstance(x, (int, Wire, Pieces)) else self.real(x)
 
+    def _delayed(self, w: Wire, d: int) -> Wire:
+        """``w``, ``d`` ticks later, through a chain of copies."""
+        if d <= 0:
+            return w
+        key = (id(self.b.local), w.signal, w.color, d)  # local signals repeat across blocks
+        if key not in self._delays:
+            prev = self._delayed(w, d - 1)
+            out = self.b.local_signal()
+            self.b.place(Arithmetic(_operand(prev), "+", 0, out, label=f"{w.signal} delayed {d}"), _colors(prev), GREEN)
+            self._delays[key] = Wire(out, prev.depth + 1, early=prev.lo + 1, vary=prev.hi + 1, reads=_reads(prev, lo=1))
+        return self._delays[key]
+
+    def _align(self, *vs) -> dict:
+        """With ``balance``: each changing wire among ``vs``, delayed to arrive
+        with the latest of them."""
+        if not self.balance:
+            return {}
+        ws = [v for v in vs if isinstance(v, Wire) and v.lo < STABLE]
+        if not ws:
+            return {}
+        target = max(w.hi for w in ws)
+        return {w: self._delayed(w, target - w.lo) for w in ws if w.lo < target}
+
+    def _aligned_bool(self, b: Bool, m: dict) -> Bool:
+        if not m:
+            return b
+        get = lambda x: m.get(x, x) if isinstance(x, Wire) else x
+        return Bool(tuple(tuple(Atom(get(at.a), at.cmp, get(at.b)) for at in cl) for cl in b.clauses))
+
     def _conds(self, b: Bool) -> list[Cond]:
         return [
             Cond(_operand(at.a), at.cmp, _operand(at.b), join="or" if j == 0 and i > 0 else "and")
@@ -240,6 +286,9 @@ class _Lowerer:
         return [x for clause in b.clauses for at in clause for x in (at.a, at.b)]
 
     def _place_lin(self, x: Lin) -> Wire:
+        m = self._align(*x.terms)
+        if m:
+            x = Lin({m.get(w, w): c for w, c in x.terms.items()}, x.const)
         out = self.b.local_signal()
         terms = list(x.terms.items())
         k = x.const
@@ -255,7 +304,7 @@ class _Lowerer:
                 self.b.place(Arithmetic(_operand(w), "*" if c != 1 else "+", c if c != 1 else 0, out, label=label), _colors(w), GREEN)
             if k:
                 self.b.place(Constant({out: k}, label=f"{label} (+ {k})"), (), GREEN)
-        return Wire(out, _depth(*x.terms) + 1, early=_early(*x.terms) + 1, vary=_vary(*x.terms) + 1)
+        return Wire(out, _depth(*x.terms) + 1, early=_early(*x.terms) + 1, vary=_vary(*x.terms) + 1, reads=_reads(*x.terms, lo=1))
 
     def _place_ors(self, x: Ors) -> Wire:
         level: list[Lowered] = list(x.parts)
@@ -264,14 +313,18 @@ class _Lowerer:
         return level[0]
 
     def _place_bool(self, x: Bool) -> Wire:
+        x = self._aligned_bool(x, self._align(*self._leaves(x)))
         out = self.b.local_signal()
         leaves = self._leaves(x)
         self.b.place(Decider(self._conds(x), [Out(out, copy=False, constant=1)], label=f"{out} = condition"), _colors(*leaves), GREEN)
-        return Wire(out, _depth(*leaves) + 1, early=_early(*leaves) + 1, vary=_vary(*leaves) + 1)
+        return Wire(out, _depth(*leaves) + 1, early=_early(*leaves) + 1, vary=_vary(*leaves) + 1, reads=_reads(*leaves, lo=1))
 
     def _place_pieces(self, x: Pieces) -> Lowered:
         out = self.b.local_signal()
         cases = [(g, v) for g, v in x.cases if v != 0]
+        m = self._align(*(leaf for g, _ in cases for leaf in self._leaves(g)), *(v for _, v in cases))
+        if m:
+            cases = [(self._aligned_bool(g, m), m.get(v, v) if isinstance(v, Wire) else v) for g, v in cases]
         guards = [leaf for g, _ in cases for leaf in self._leaves(g)]
         label = f"{out} = case"
         def guard_depth(g: Bool) -> int:
@@ -282,14 +335,14 @@ class _Lowerer:
         # ready first.
         by_product = max(_depth(*self._leaves(g)) + 1 if isinstance(v, int) else max(_depth(v), guard_depth(g)) + 1 for g, v in cases)
         by_rename = _depth(*guards, *(v for _, v in cases)) + 2
-        if by_product <= by_rename:
+        if by_product <= by_rename and not self.balance:  # products: paths of 1 and 2
             for g, v in cases:
                 if isinstance(v, int):
                     self.b.place(Decider(self._conds(g), [Out(out, copy=False, constant=v)], label=label), _colors(*self._leaves(g)), GREEN)
                 else:
                     flag = self.real(g)
                     self.b.place(Arithmetic(_operand(v), "*", _operand(flag), out, label=f"{label} (value * guard)"), _colors(v, flag), GREEN)
-            return Wire(out, by_product, early=_early(*guards, *(v for _, v in cases)) + 1, vary=_vary(*guards, *(v for _, v in cases)) + 2)
+            return Wire(out, by_product, early=_early(*guards, *(v for _, v in cases)) + 1, vary=_vary(*guards, *(v for _, v in cases)) + 2, reads=_reads(*guards, *(v for _, v in cases), lo=1, hi=2))
         # Deciders cannot rename: each case passes its value under its own name
         # onto a private net, and Each + 0 sums that net into the result.
         private = self.b.nl.net(GREEN, f"cases {out}")
@@ -299,7 +352,7 @@ class _Lowerer:
         rename = Arithmetic(Sig(EACH, frozenset({GREEN})), "+", 0, out, label=f"{label} (rename)")
         self.b.place(rename, (), GREEN)
         private.attach(rename.inp)
-        return Wire(out, _depth(*guards, *(v for _, v in cases)) + 2, early=_early(*guards, *(v for _, v in cases)) + 2, vary=_vary(*guards, *(v for _, v in cases)) + 2)
+        return Wire(out, _depth(*guards, *(v for _, v in cases)) + 2, early=_early(*guards, *(v for _, v in cases)) + 2, vary=_vary(*guards, *(v for _, v in cases)) + 2, reads=_reads(*guards, *(v for _, v in cases), lo=1, hi=2))
 
     def lazy_op(self, op: Op):
         """``op`` as a lazy form, or NotImplemented to place it the plain way."""
@@ -420,9 +473,11 @@ class _Lowerer:
     def arith(self, op: str, a: Lowered, b: Lowered, label: str) -> Lowered:
         if isinstance(a, int) and isinstance(b, int):
             return arith(op, a, b)
+        m = self._align(a, b)
+        a, b = (m.get(x, x) if isinstance(x, Wire) else x for x in (a, b))
         out = self.b.local_signal()
         self.b.place(Arithmetic(_operand(a), op, _operand(b), out, label=label), _colors(a, b), GREEN)
-        return Wire(out, _depth(a, b) + 1, early=_early(a, b) + 1, vary=_vary(a, b) + 1)
+        return Wire(out, _depth(a, b) + 1, early=_early(a, b) + 1, vary=_vary(a, b) + 1, reads=_reads(a, b, lo=1))
 
     def compare(self, cmp: str, a: Lowered, b: Lowered, label: str) -> Lowered:
         if isinstance(a, int) and isinstance(b, int):
@@ -430,10 +485,12 @@ class _Lowerer:
         if isinstance(a, int):
             a, b, cmp = b, a, _MIRROR[cmp]
         assert isinstance(a, Wire)
+        m = self._align(a, b)
+        a, b = m.get(a, a), m.get(b, b) if isinstance(b, Wire) else b
         out = self.b.local_signal()
         dec = Decider([Cond(_operand(a), cmp, _operand(b))], [Out(out, copy=False, constant=1)], label=label)
         self.b.place(dec, _colors(a, b), GREEN)
-        return Wire(out, _depth(a, b) + 1, early=_early(a, b) + 1, vary=_vary(a, b) + 1)
+        return Wire(out, _depth(a, b) + 1, early=_early(a, b) + 1, vary=_vary(a, b) + 1, reads=_reads(a, b, lo=1))
 
     def select(self, c: Lowered, t: Lowered, f: Lowered, label: str) -> Lowered:
         if isinstance(c, int):
@@ -448,12 +505,14 @@ class _Lowerer:
             a, b, cmp = b, a, _MIRROR[cmp]
         if t == f:
             return t
+        m = self._align(a, b, t, f)
+        a, b, t, f = (m.get(x, x) if isinstance(x, Wire) else x for x in (a, b, t, f))
         out = self.b.local_signal()
         cond = [Cond(_operand(a), cmp, _operand(b))]
         if isinstance(t, int) and isinstance(f, int):
             dec = Decider(cond, [Out(out, copy=False, constant=t)], [Out(out, copy=False, constant=f)], label=label)
             self.b.place(dec, _colors(a, b), GREEN)
-            return Wire(out, _depth(a, b) + 1, early=_early(a, b) + 1, vary=_vary(a, b) + 1)
+            return Wire(out, _depth(a, b) + 1, early=_early(a, b) + 1, vary=_vary(a, b) + 1, reads=_reads(a, b, lo=1))
 
         # Pass the chosen value under its own name onto a private net, then
         # rename it with Each + 0 onto the block's net.
@@ -468,7 +527,7 @@ class _Lowerer:
         rename = Arithmetic(Sig(EACH, frozenset({GREEN})), "+", 0, out, label=f"{label} (rename)")
         self.b.place(rename, (), GREEN)
         private.attach(rename.inp)
-        return Wire(out, _depth(a, b, t, f) + 2, early=_early(a, b, t, f) + 2, vary=_vary(a, b, t, f) + 2)
+        return Wire(out, _depth(a, b, t, f) + 2, early=_early(a, b, t, f) + 2, vary=_vary(a, b, t, f) + 2, reads=_reads(a, b, t, f, lo=2))
 
     def uge(self, a: Lowered, b: Lowered, label: str) -> Lowered:
         fa = self.arith("XOR", a, INT_MIN, f"{label} (flip a)")

@@ -65,7 +65,7 @@ from dataclasses import dataclass, field
 from .frontend import Array
 from .frontend import Unsupported
 from .layout import screen_poles
-from .lower import Lowered, Wire, _Builder, _early, _vary
+from .lower import Lowered, Wire, _Builder, _early, _reads, _vary
 from .netlist import GREEN, RED, Color, Arithmetic, Cond, Constant, Decider, Gate, Lamp, Net, Out, Pole, Sig, Wall
 from .signals import EACH, allocatable_signals
 
@@ -73,6 +73,16 @@ ADDRESS = "signal-A"
 VALUE = "signal-V"
 ENABLE = "signal-E"
 LOAD_LATENCY = 5  # ticks from a settled address to the loaded value
+READ_TO_RESULT = 2  # the reader samples the chunk loop this many ticks before the loaded value is out
+STORE_LANDS = 3  # a store sampled at tick k is on the chunk loop from tick k + 3
+
+
+def _merge_reads(x: tuple, y: tuple) -> tuple:
+    out: dict[str, tuple[int, int]] = {}
+    for a, lo, hi in (*x, *y):
+        plo, phi = out.get(a, (lo, hi))
+        out[a] = (min(plo, lo), max(phi, hi))
+    return tuple((a, lo, hi) for a, (lo, hi) in sorted(out.items()))
 CHUNK = len(allocatable_signals())  # words per chunk: every usable signal
 
 
@@ -165,7 +175,10 @@ class Memory:
         rename = Arithmetic(Sig(VALUE, frozenset({result.color})), "+", 0, out, label=f"{label} (data)")
         self.b.place(rename, (), GREEN)
         result.attach(rename.inp)
-        return Wire(out, _depth_of(address) + LOAD_LATENCY, early=_early(address) + LOAD_LATENCY, vary=_vary(address) + LOAD_LATENCY)
+        return Wire(
+            out, _depth_of(address) + LOAD_LATENCY, early=_early(address) + LOAD_LATENCY, vary=_vary(address) + LOAD_LATENCY,
+            reads=_merge_reads(_reads(address, lo=LOAD_LATENCY), ((a.name, READ_TO_RESULT, READ_TO_RESULT),)),
+        )
 
     def assign_io(self, chosen: dict[str, list[str]], taken_on_output: set[str]) -> dict[str, list[str]]:
         """Pick the I/O signal of every word of every external array."""

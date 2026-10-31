@@ -31,7 +31,7 @@ from .fuse import Bool, pieces
 from .lower import GATE, PRIVATE_CONSTANT, STABLE, Lowered, Wire, _Builder, _colors, _depth, _early, _Lowerer, _operand, _vary
 from .signals import EACH, rich_text
 from .netlist import GREEN, RED, Arithmetic, Cond, Connector, Constant, Decider, Message, Net, Netlist, Out, Panel, Sig
-from .memory import ADDRESS, Memory, Ptr
+from .memory import ADDRESS, STORE_LANDS, Memory, Ptr
 from .schedule import GATE_TO_LATCH, BlockSchedule, Jump, Load, Register, Schedule, Store, Test, Write
 from .sim import Simulator, wrap
 
@@ -320,7 +320,7 @@ class _CfgLowerer(_Lowerer):
     def _emit_load(self, ld: Load, bs: BlockSchedule) -> None:
         assert self.mem is not None
         s = Sig(self.step, frozenset({RED}))
-        window = [Cond(s, ">=", bs.base), Cond(s, "<=", bs.jump)]
+        window = [Cond(s, ">=", bs.base), Cond(s, "<=", bs.jump + bs.drain)]
         arr = next(a for a in self.fn.arrays if a.name == ld.array)
         # Addresses travel as address + 1 (see memory.py).
         self._pass(window, ld.address, ADDRESS, self.mem.port(arr, ld.port).address, f"{bs.name}: {ld}", add=1)
@@ -376,6 +376,7 @@ class _CfgLowerer(_Lowerer):
         for b in self.fn.blocks:
             nets[b.name] = self.b.begin_block(b.name)
             self.cur = b.name
+            self.balance = self._loop_with_stores(b)
             self.local, self.loads, self.stores = {}, [], []
             for op in b.ops:
                 self.set(op.result, self.op(op))
@@ -395,6 +396,7 @@ class _CfgLowerer(_Lowerer):
         for b, bs in zip(self.fn.blocks, sched):
             self.local = lowered[b.name]
             self.cur = b.name
+            self.balance = self._loop_with_stores(b)
             for p in b.phis:
                 if id(p.result) in self.copies:
                     self._keep(bs, self.copies[id(p.result)][0], p.result, f"copy %{p.result.name}")
@@ -410,6 +412,7 @@ class _CfgLowerer(_Lowerer):
                             self._keep(bs, self.regs[id(p.result)], v, p.text)
             self._plan_terminator(b, bs, schedule)
 
+        self.balance = False
         # Emit: each block's gates and jumps next to its combinators, then registers.
         for bs in sched:
             self.b.local, self.b.group = nets[bs.name], bs.name
@@ -494,6 +497,12 @@ class _CfgLowerer(_Lowerer):
                 return b
         raise KeyError(name)
 
+    @staticmethod
+    def _loop_with_stores(b: Block) -> bool:
+        """A one-block loop that stores: a candidate for _pipeline, so its
+        combinators are balanced as they are placed."""
+        return b.term is not None and b.name in b.term.targets and any(op.opcode in ("store", "clear") for op in b.ops)
+
     def _pipeline(self, b: Block, bs: BlockSchedule) -> None:
         """Overlap the iterations of a one-block loop, if that is faster.
 
@@ -523,29 +532,63 @@ class _CfgLowerer(_Lowerer):
         """
         t = b.term
         assert t is not None
-        if b.name not in t.targets or self.loads or not self.stores:
+        if b.name not in t.targets or not self.stores:
             return
         needed = self._needed(b)
-        ii = max(3, _vary(*needed) + 2)
+        ins_of = {id(st): [x for x in (st.address, st.value, st.enable) if x is not None] for st in self.stores}
         ks: dict[int, int] = {}
         before = 0
         for wave in sorted({st.wave for st in self.stores}):
             nxt = before
             for st in (x for x in self.stores if x.wave == wave):
-                ins = [x for x in (st.address, st.value, st.enable) if x is not None]
-                ks[id(st)] = k = max(1, _vary(*ins), before + 1)
-                ii = max(ii, k - _early(*ins) + 1)
-                nxt = max(nxt, k)
+                ks[id(st)] = max(1, _vary(*ins_of[id(st)]), before + 1)
+                nxt = max(nxt, ks[id(st)])
             before = nxt
-        ii = max(ii, max(ks.values()) - min(ks.values()) + 1)
+        for _ in range(16):
+            ii = max(3, _vary(*needed) + 2, max(ks.values()) - min(ks.values()) + 1)
+            # (Each changing store input gets delayed to arrive at its store's
+            # tick, so it is in its window whatever II.)
+            # Memory: a read of an array the loop writes must see every store
+            # of the iterations before and none of its own (nor later ones').
+            # A read r ticks into the iteration sees a store at k once
+            # r >= k + STORE_LANDS; the previous iteration's at k - II.
+            written: dict[str, list[int]] = {}
+            for st in self.stores:
+                written.setdefault(st.array, []).append(ks[id(st)])
+            late = 0  # how far the stores must move later
+            for v in needed:
+                for arr, lo, hi in v.reads if isinstance(v, Wire) else ():
+                    if arr in written:
+                        # sampled at II - 2 (kept) or II - 1 (branch)
+                        ii = max(ii, -(-(max(written[arr]) + STORE_LANDS + 2 + hi) // 2))
+                        late = max(late, (ii - 1 - lo) - (min(written[arr]) + STORE_LANDS - 1))
+            for st in self.stores:
+                for v in ins_of[id(st)]:
+                    d = ks[id(st)] - v.lo if isinstance(v, Wire) and v.lo < STABLE else 0
+                    for arr, lo, hi in v.reads if isinstance(v, Wire) else ():
+                        lo, hi = lo + d, hi + d
+                        if arr in written:
+                            ii = max(ii, max(written[arr]) + STORE_LANDS - ks[id(st)] + hi)
+                            late = max(late, (ks[id(st)] - lo) - (min(written[arr]) + STORE_LANDS - 1))
+            if late <= 0:
+                break
+            ks = {i: k + late for i, k in ks.items()}
+        else:
+            return
         # The first iteration also waits for what settles once (loop
         # invariants, inputs): the prologue.
         pro = max(0, _depth(*needed) - (ii - 2))
         for st in self.stores:
-            ins = [x for x in (st.address, st.value, st.enable) if x is not None]
-            pro = max(pro, _depth(*ins) - ks[id(st)])
+            for v in ins_of[id(st)]:
+                if isinstance(v, Wire):  # changing inputs get delayed by k - early
+                    pro = max(pro, v.depth - (v.lo if v.lo < STABLE else ks[id(st)]))
         if ii >= bs.depth + 2:
             return
+        for st in self.stores:
+            k = ks[id(st)]
+            delay = lambda v: self._delayed(v, k - v.lo) if isinstance(v, Wire) and v.lo < STABLE else v
+            st.address, st.value = delay(st.address), delay(st.value)
+            st.enable = delay(st.enable) if st.enable is not None else None
         bs.depth, bs.pipelined, bs.prologue = pro + ii - 2, True, pro
         for st in self.stores:
             st.delay = ks[id(st)]
