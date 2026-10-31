@@ -8,7 +8,7 @@ version = "0.0.1"
 description = "Compile LLVM IR to Factorio combinator circuits"
 requires-python = ">=3.11"
 license = { text = "LGPL-2.1-or-later" }
-dependencies = ["llvmlite>=0.42", "pyperclip>=1.8"]
+dependencies = ["llvmlite>=0.45", "pyperclip>=1.8"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

@@ -289,7 +289,8 @@ def read_function(ir_text: str, name: str | None = None) -> Function:
                 break
             if opc == "switch":
                 vals = [int(v) for v in _CASE.findall(text)]
-                dests = [target(r) for r in refs[2:]]
+                # LLVM <= 21 interleaves case values and targets in the operands; 22 lists only targets.
+                dests = [target(r) for r in refs[2:] if _key(r) in block_names]
                 block.term = Term("switch", [target(refs[1])], operand(refs[0], text), list(zip(vals, dests)), text=text)
                 break
             if opc == "ret":
