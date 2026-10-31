@@ -41,10 +41,11 @@ int scatter(int k) {
 int big[1000];
 
 /* Big array: 1000 words in 3 chunks (395 + 395 + 210). Writes a stride-7
- * pattern across all of them and reads back words from each chunk. */
+ * pattern across all of them and reads back words from each chunk
+ * (0 in chunk 0, 399 in chunk 1, 791 and 994 in chunk 2). */
 int chunks(int n) {
 #pragma unroll 4
     for (int i = 0; i < 1000; i += 7)
         big[i] = i + n;
-    return big[0] + big[392] * 3 + big[791] * 5 + big[994] * 7;
+    return big[0] + big[399] * 3 + big[791] * 5 + big[994] * 7;
 }

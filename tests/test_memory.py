@@ -132,3 +132,17 @@ def test_reset_held_long_then_released(build):
     sim.run_until(lambda s: s.read(c.bus, STEP) == c.halt)
     sim.step()
     assert sim.read(c.bus, c.result) == 7
+
+
+def test_constant_byte_gep_into_a_global():
+    # Newer clang folds big[392] into a byte offset.
+    ir = """
+@big = dso_local global [400 x i32] zeroinitializer, align 16
+define dso_local i32 @f(i32 %n) {
+entry:
+  store i32 %n, ptr getelementptr inbounds nuw (i8, ptr @big, i64 1568), align 16
+  %1 = load i32, ptr getelementptr inbounds nuw (i8, ptr @big, i64 1568), align 16
+  ret i32 %1
+}
+"""
+    assert lower(read_function(ir, "f")).run(7) == 7
