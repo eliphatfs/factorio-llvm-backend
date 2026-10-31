@@ -129,7 +129,7 @@ class Wall(Entity):
     connection point is modelled as the output side."""
 
     condition: "Cond"
-    sensor: str
+    sensor: str | None = None  # None: controls its gate, reads nothing
     pressed: bool = False
 
     has_input = False

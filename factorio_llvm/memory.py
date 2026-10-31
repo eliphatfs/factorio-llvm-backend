@@ -225,25 +225,42 @@ class Memory:
                     self._reader(bank, base, j, port, key_net, bank.loops[c], group)
 
     def _joystick(self) -> Net:
-        """Place the joystick cage left of the screen; return the net its walls report on.
+        """Place the joystick left of the screen; return the net its walls report on.
 
-        The player stands on the middle tile, boxed in by 8 closed gates. Walking
-        into one fires its sensor, and the wall in line with it outputs that
-        direction's signal. An off switch opens every gate to get in and out."""
+        The player stands in a closed 3x3 ring of walls whose bottom middle is a
+        door gate. Eight sensor gates stand JOYSTICK_REACH tiles away, one per
+        direction, held shut. Pushing towards one brings the player a little
+        closer to it, so its sensor fires and its wall outputs that direction's
+        signal; gates nearer than that would see the player all the time. The
+        off switch opens the door to get in and out."""
         net = self.b.nl.net(RED, "joystick")
-        exit_switch = Constant({JOYSTICK_EXIT: 1}, enabled=False, label="joystick gates: switch on to get in or out")
+        exit_switch = Constant({JOYSTICK_EXIT: 1}, enabled=False, label="joystick door: switch on to get in or out")
         net.attach(self.b.place(exit_switch, (), None, "joystick").out)
-        self.b.tag(exit_switch.out, "JOYSTICK: switch on to open the gates", "signal-X", group="joystick")
+        self.b.tag(exit_switch.out, "JOYSTICK: switch on to open the door", "signal-X", group="joystick")
         cx, cy = JOYSTICK_CENTRE
-        opened = Cond(Sig(JOYSTICK_EXIT, frozenset({RED})), ">", 0)
-        for sig, (dx, dy) in zip(JOYSTICK, _JOYSTICK_STEPS):
-            # Diagonal gates stand north-south, with the wall above or below.
-            vertical = dx == 0 or dy != 0
-            wx, wy = (dx, 2 * dy) if vertical else (2 * dx, dy)
-            gate = Gate(vertical=vertical, label=f"joystick {sig} gate", position=(cx + dx + 0.5, cy + dy + 0.5))
-            wall = Wall(opened, sig, label=f"joystick {sig}", position=(cx + wx + 0.5, cy + wy + 0.5))
-            self.b.place(gate, (), None, "screen")
-            self.b.place(wall, (), net, "screen")
+        x = Sig(JOYSTICK_EXIT, frozenset({RED}))
+
+        def put(e, dx: float, dy: float, wired: bool = False) -> None:
+            e.position = (cx + dx + 0.5, cy + dy + 0.5)
+            self.b.place(e, (), net if wired else None, "screen")
+
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if (dx, dy) == (0, 1):
+                    put(Gate(vertical=False, label="joystick door"), dx, dy)
+                elif (dx, dy) == (1, 1):
+                    put(Wall(Cond(x, ">", 0), label="joystick door control"), dx, dy, wired=True)
+                elif (dx, dy) != (0, 0):
+                    put(Wall(Cond(x, "<", 0), label="joystick cage"), dx, dy)
+        r = JOYSTICK_REACH
+        for sig, (sx, sy) in zip(JOYSTICK, _JOYSTICK_STEPS):
+            # North and south gates lie east-west with their wall beside them;
+            # the rest stand north-south with their wall above.
+            vertical = sx != 0
+            gx, gy = sx * r, sy * r
+            put(Gate(vertical=vertical, label=f"joystick {sig} gate"), gx, gy)
+            # Never open (X is 0 or 1): the gate only senses.
+            put(Wall(Cond(x, "<", 0), sig, label=f"joystick {sig}"), gx + (0 if vertical else 1), gy - (1 if vertical else 0), wired=True)
         return net
 
     def _key(self, a: Array, base: int, words: list[tuple[str, int]], group: str, color: Color = GREEN) -> Net:
@@ -335,7 +352,8 @@ MAX_SCREEN_ROWS = 16
 JOYSTICK = ("up-arrow", "up-right-arrow", "right-arrow", "down-right-arrow", "down-arrow", "down-left-arrow", "left-arrow", "up-left-arrow")
 _JOYSTICK_STEPS = ((0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1))
 JOYSTICK_EXIT = "signal-X"
-JOYSTICK_CENTRE = (-6, -5)  # the player's tile, left of the screen  # two rows of substations power at most this many
+JOYSTICK_REACH = 7  # tiles from the player to each sensor gate (from an in-game test)
+JOYSTICK_CENTRE = (-JOYSTICK_REACH - 4, -JOYSTICK_REACH - 4)  # the player's tile, left of and above the screen  # two rows of substations power at most this many
 
 
 # Default I/O signals: digits, then letters, then the rest.

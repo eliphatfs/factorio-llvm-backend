@@ -142,12 +142,10 @@ def _control_behavior(e: Entity) -> dict[str, Any]:
         assert e.condition is not None
         return {"circuit_enabled": True, "circuit_condition": _plain_cond(e.condition)}
     if isinstance(e, Wall):
-        return {
-            "circuit_open_gate": True,
-            "circuit_condition": _plain_cond(e.condition),
-            "circuit_read_sensor": True,
-            "output_signal": _signal(e.sensor),
-        }
+        cb = {"circuit_open_gate": True, "circuit_condition": _plain_cond(e.condition)}
+        if e.sensor:
+            cb |= {"circuit_read_sensor": True, "output_signal": _signal(e.sensor)}
+        return cb
     if isinstance(e, Panel):
         return {
             "parameters": [
@@ -302,7 +300,7 @@ def _entity_in(d: dict[str, Any]) -> Entity:
             return Lamp(rgb=cb["rgb_signal"]["name"], label=label, position=pos)
         return Lamp(_cond_in(cb["circuit_condition"]), label=label, position=pos)
     if name == "stone-wall":
-        return Wall(_cond_in(cb["circuit_condition"]), cb["output_signal"]["name"], label=label, position=pos)
+        return Wall(_cond_in(cb["circuit_condition"]), cb["output_signal"]["name"] if cb.get("circuit_read_sensor") else None, label=label, position=pos)
     if name == "gate":
         return Gate(d.get("direction", 0) == 0, label=label, position=pos)
     if name == "display-panel":
