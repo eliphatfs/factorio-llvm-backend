@@ -143,6 +143,8 @@ _EXTERN = re.compile(r"^@([\w.$-]+) = external .*?\bglobal (\[(\d+) x i32\]|i32)
 _ALLOCA = re.compile(r"alloca (\[(\d+) x i32\]|i32)(?=,|$)")
 _GEP = re.compile(r"getelementptr (?:inbounds |nuw |nusw )*(\[\d+ x i32\]|i32|i8), ptr")
 _CONST_GEP = re.compile(r"ptr getelementptr (?:inbounds |nuw |nusw )*\(\[\d+ x i32\], ptr @([\w.$-]+), i64 0, i64 (\d+)\)")
+# The same as a byte offset: newer clang folds a constant index into an i8 gep.
+_CONST_GEP_I8 = re.compile(r"ptr getelementptr (?:inbounds |nuw |nusw )*\(i8, ptr @([\w.$-]+), i64 (\d+)\)")
 _MEMSET = re.compile(r"@llvm\.memset\.")
 _SKIPPED_CALLS = re.compile(r"@llvm\.(lifetime|assume|dbg)\.")
 
@@ -234,12 +236,18 @@ def read_function(ir_text: str, name: str | None = None) -> Function:
         if str(ref.type) == "ptr" and ref.is_constant:
             if ref.name in globals_:
                 return globals_[ref.name]
-            m = _CONST_GEP.fullmatch(str(ref).strip())
+            text = str(ref).strip()
+            m = _CONST_GEP.fullmatch(text)
+            index = int(m.group(2)) if m else None
+            if m is None and (m := _CONST_GEP_I8.fullmatch(text)):
+                if int(m.group(2)) % 4:
+                    raise Unsupported(f"pointer into the middle of a word: {where}")
+                index = int(m.group(2)) // 4
             if m and m.group(1) in globals_:
                 # A constant element pointer: a gep at the point of use.
                 arr = globals_[m.group(1)]
-                p = Value(f"{arr.name}.{m.group(2)}", 32, arr)
-                out.blocks[-1].ops.append(Op("gep", [arr, int(m.group(2))], p, text=str(ref).strip()))
+                p = Value(f"{arr.name}.{index}", 32, arr)
+                out.blocks[-1].ops.append(Op("gep", [arr, index], p, text=text))
                 return p
             raise Unsupported(f"pointer {ref}: {where}")
         if ref.is_constant:
