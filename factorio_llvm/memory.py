@@ -251,8 +251,8 @@ class Memory:
             put(Wall(Cond(x, "<", 0), label="joystick cage"), dx, dy)
         put(Gate(vertical=False, label="joystick door"), 0, 1)
         put(Wall(Cond(x, ">", 0), label="joystick door control"), 1, 1, wired=True)
-        r = JOYSTICK_REACH
         for sig, (sx, sy) in zip(JOYSTICK, _JOYSTICK_STEPS):
+            r = JOYSTICK_REACH if sx == 0 or sy == 0 else JOYSTICK_DIAGONAL_REACH
             # North and south gates lie east-west with their wall beside them;
             # the rest stand north-south with their wall above.
             vertical = sx != 0
@@ -351,7 +351,8 @@ MAX_SCREEN_ROWS = 16
 JOYSTICK = ("up-arrow", "up-right-arrow", "right-arrow", "down-right-arrow", "down-arrow", "down-left-arrow", "left-arrow", "up-left-arrow")
 _JOYSTICK_STEPS = ((0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1))
 JOYSTICK_EXIT = "signal-X"
-JOYSTICK_REACH = 7  # tiles from the player to each sensor gate (from an in-game test)
+JOYSTICK_REACH = 7  # tiles from the player to the N/E/S/W sensor gates (from an in-game test)
+JOYSTICK_DIAGONAL_REACH = 5  # tiles along each axis to the diagonal ones (7 was too far)
 JOYSTICK_CENTRE = (-JOYSTICK_REACH - 4, -JOYSTICK_REACH - 4)  # the player's tile, left of and above the screen  # two rows of substations power at most this many
 
 
