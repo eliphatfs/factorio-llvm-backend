@@ -78,7 +78,7 @@ def test_latency_is_depth():
     c = lower(read_function(compile_c("int f(int a, int b) { return (a + b) * (a - b); }")))
     # two parallel ops, then the multiply
     assert c.latency == 2
-    assert len(c.netlist.entities) == 2 + 3
+    assert len(c.netlist.entities) == 2 + 2 + 3  # arguments, their tags, ops
 
 
 def test_constant_result_needs_no_combinators():

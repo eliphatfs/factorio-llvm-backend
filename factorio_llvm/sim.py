@@ -26,7 +26,9 @@ from .netlist import (
     Constant,
     Decider,
     Entity,
+    Gate,
     Lamp,
+    Wall,
     Netlist,
     Panel,
     Out,
@@ -241,7 +243,9 @@ class Simulator:
                     new[id(e)] = eval_arithmetic(e, self._inputs(e))
                 elif isinstance(e, Decider):
                     new[id(e)] = eval_decider(e, self._inputs(e))
-                elif isinstance(e, (Constant, Pole, Lamp, Panel)):
+                elif isinstance(e, Wall):
+                    new[id(e)] = {e.sensor: 1} if e.pressed else {}
+                elif isinstance(e, (Constant, Pole, Lamp, Panel, Gate)):
                     new[id(e)] = {}
                 else:
                     raise TypeError(f"cannot simulate {type(e).__name__}")

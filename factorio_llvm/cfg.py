@@ -287,6 +287,7 @@ class _CfgLowerer(_Lowerer):
         for p in self.fn.params:
             s = self.b.signal()
             params.append(self.b.place(Constant({s: 0}, label=f"argument %{p.name} = {rich_text(s)}"), (), RED, group="arguments"))
+            self.b.tag(params[-1].out, f"argument %{p.name}", s, group="arguments")
             param_signals.append(s)
             self.env[id(p)] = Wire(s, 0, RED)
             self.names[p.name] = s
@@ -370,7 +371,7 @@ class _CfgLowerer(_Lowerer):
         if self.mem is not None:
             io = self.mem.assign_io(self.io_choice, {result.signal, DONE})
             banks = list(self.mem.banks.values())
-            ins = [b for b in banks if b.is_input]
+            ins = [b for b in banks if b.is_input]  # the joystick has its own net
             if ins:
                 # Every input word starts at 0 here: set it in the terminal, or
                 # wire the factory to it.
@@ -379,7 +380,7 @@ class _CfgLowerer(_Lowerer):
                 label = "INPUT: wire the factory here, or set values here.\n" + _io_lines(ins)
                 in_terminal = self.b.place(Constant(zeros, label=label), (), inputs)
                 self._tag(in_terminal.out, "INPUT", "signal-I")
-            outs = [b for b in banks if b.array.external and not b.is_input and not b.is_screen]
+            outs = [b for b in banks if b.array.external and b.side == "OUTPUT"]
             if outs:
                 out_terminal.label += "\n" + _io_lines(outs)
             self.mem.build(inputs, output, self.screen_width)
@@ -425,12 +426,7 @@ class _CfgLowerer(_Lowerer):
         return _depth(*(x.index if isinstance(x, Ptr) else x for x in needed))
 
     def _tag(self, terminal: Connector, text: str, icon: str) -> None:
-        """A display panel naming ``terminal``, on a green wire so it is placed next to it."""
-        # A wired panel shows only its messages, so give it one that always holds
-        # (signal-dot is never on the wire, so it reads 0).
-        always = Message(Cond(Sig("signal-dot", frozenset({GREEN})), "=", 0), icon, text)
-        tag = self.b.place(Panel([always], text=text, icon=icon, always_show=True, label=text))
-        self.b.nl.net(GREEN, f"tag {text}").attach(terminal, tag.inp)
+        self.b.tag(terminal, text, icon)
 
     def _keep(self, bs: BlockSchedule, r: Register, v: Operand, label: str) -> None:
         if not any(w.register is r for w in bs.writes):

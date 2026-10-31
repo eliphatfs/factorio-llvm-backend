@@ -28,7 +28,7 @@ import math
 from collections import deque
 
 from .frontend import Unsupported
-from .netlist import GREEN, RED, Color, Connector, Constant, Entity, Lamp, Net, Panel, Netlist, Pole, WireSeg
+from .netlist import GREEN, RED, Color, Connector, Constant, Entity, Gate, Lamp, Net, Panel, Wall, Netlist, Pole, WireSeg
 
 CELL = 12
 COMBINATOR_REACH = 9.0
@@ -107,7 +107,7 @@ def place(netlist: Netlist, per_cell: int = SLOTS_PER_CELL) -> list[Pole]:
         cell, k = divmod(n, per_cell)
         ox, oy = _cell_origin(cell, width)
         col, rp = slots[k * SLOTS_PER_CELL // per_cell]
-        if isinstance(e, (Constant, Lamp, Panel)):
+        if isinstance(e, (Constant, Lamp, Panel, Wall, Gate)):
             e.position = (ox + col + 0.5, oy + 2 * rp + 0.5)
         else:
             e.position = (ox + col + 0.5, oy + 2 * rp + 1.0)

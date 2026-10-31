@@ -14,7 +14,7 @@ from typing import Iterable, TypeVar
 
 from .frontend import Function, Op, Operand, Unsupported, Value
 from .signals import rich_text
-from .netlist import GREEN, RED, Arithmetic, Color, Cond, Connector, Constant, Decider, Entity, Net, Netlist, Out, Sig
+from .netlist import GREEN, RED, Arithmetic, Color, Cond, Connector, Constant, Decider, Entity, Message, Net, Netlist, Out, Panel, Sig
 from .signals import EACH, allocatable_signals
 from .sim import Simulator, arith, compare, wrap
 
@@ -136,6 +136,14 @@ class _Builder:
         if out is not None:
             (out if isinstance(out, Net) else self.net_of(out)).attach(e.out)
         return e
+
+    def tag(self, terminal: Connector, text: str, icon: str, group: str | None = None) -> None:
+        """A display panel naming ``terminal``, on a green wire so it is placed next to it."""
+        # A wired panel shows only its messages, so give it one that always holds
+        # (signal-dot is never on the wire, so it reads 0).
+        always = Message(Cond(Sig("signal-dot", frozenset({GREEN})), "=", 0), icon, text)
+        panel = self.place(Panel([always], text=text, icon=icon, always_show=True, label=text), group=group)
+        self.nl.net(GREEN, f"tag {text}").attach(terminal, panel.inp)
 
 
 def _operand(v: Lowered) -> Sig | int:
@@ -312,6 +320,7 @@ class _Lowerer:
         for p in self.fn.params:
             s = self.b.signal()
             params.append(self.b.place(Constant({s: 0}, label=f"argument %{p.name} = {rich_text(s)}"), (), RED, group="arguments"))
+            self.b.tag(params[-1].out, f"argument %{p.name}", s, group="arguments")
             param_signals.append(s)
             self.set(p, Wire(s, 0, RED))
         self.b.begin_block(self.fn.blocks[0].name)

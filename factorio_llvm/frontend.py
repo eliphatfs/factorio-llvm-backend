@@ -500,7 +500,14 @@ def compile_c(source: str | Path, *, opt: str = "-O2", unroll: int = 1) -> str:
     flags = CLANG_FLAGS
     if unroll > 1:
         flags = [f for f in CLANG_FLAGS if f != "-fno-unroll-loops"] + ["-funroll-loops", "-mllvm", f"-unroll-count={unroll}"]
-    base = [clang, opt, *flags, "-S", "-emit-llvm", "-fno-discard-value-names", "-o", "-"]
+    include = Path(__file__).parent / "include"  # factorio.h
+    base = [clang, opt, *flags, "-I", str(include), "-S", "-emit-llvm", "-fno-discard-value-names", "-o", "-"]
     if isinstance(source, Path) or (isinstance(source, str) and source.endswith(".c") and Path(source).exists()):
         return subprocess.run([*base, str(source)], check=True, capture_output=True, text=True).stdout
     return subprocess.run([*base, "-x", "c", "-"], input=source, check=True, capture_output=True, text=True).stdout
+
+
+def screen_width_of(ir_text: str) -> int | None:
+    """The ``screen_width`` constant factorio.h defines from SCREEN_W, if any."""
+    m = re.search(r"^@screen_width = [^\n]*constant i32 (-?\d+)", ir_text, re.M)
+    return int(m.group(1)) if m else None

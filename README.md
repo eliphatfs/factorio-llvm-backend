@@ -74,6 +74,16 @@ is a lamp screen instead: a grid of lamps above the circuit, each showing its
 word as a packed `0xRRGGBB` colour (`--screen-width` sets the row length, at
 most 16 rows).
 
+`#include <factorio.h>` (found automatically) declares these devices with
+docs and helpers: define `SCREEN_W`/`SCREEN_H` first for `screen[]` (its width
+also sets the lamp layout), plus `RGB()` and colour names. `joystick[8]` is an
+8-direction joystick (`JOY_N` .. `JOY_NW`, or `joy_dx()`/`joy_dy()`): a cage
+of 8 gates left of the screen. Switch on the tagged constant to open the gates,
+stand on the middle tile, switch it off, then walk with WASD; each gate's wall
+reports its arrow signal. See `examples/joystick.c`. Gate orientation and the
+wall's circuit settings follow an in-game experiment but the exported
+blueprint is untested in game.
+
 ## Usage
 
 ```
