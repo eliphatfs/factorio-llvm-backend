@@ -43,3 +43,58 @@ def test_joystick_loop_takes_five_ticks():
     body = _loop(c, "for.body")
     assert body.pipelined and body.jump - body.base - body.prologue + 1 == 5
     assert c.run(5) == 27
+
+
+def _wrap(x):
+    return (x + 2**31) % 2**32 - 2**31
+
+
+def test_loops_that_read_memory_overlap_too():
+    # h[...] += ...: each iteration reads what the one before may have written.
+    src = """int f(int n, int a) { int v[16] = {0}; for (int i = 0; i < 16; i++) v[i] = i * a + 1;
+      int h[4] = {0}; for (int i = 0; i < n; i++) h[(v[i] ^ i) & 3] += i + 1;
+      int s = 0; for (int k = 0; k < 4; k++) s = s * 5 + h[k]; return s; }"""
+
+    def native(n, a):
+        v = [_wrap(i * a + 1) for i in range(16)]
+        h = [0] * 4
+        for i in range(n):
+            h[(v[i] ^ i) & 3] += i + 1
+        s = 0
+        for k in range(4):
+            s = _wrap(s * 5 + h[k])
+        return s
+
+    c = lower(read_function(compile_c(src), "f"))
+    body = next(b for b in c.schedule.blocks if b.pipelined and b.loads)
+    assert body.jump - body.base - body.prologue + 1 < 8
+    for n in (1, 2, 7, 16):
+        for a in (1, 3, -2):
+            assert c.run(n, a) == native(n, a), (n, a)
+
+
+def test_two_unrolled_pipelined_loops():
+    # Block-local signals repeat across blocks: delays must not be shared.
+    src = """int perm[16];
+    int f(int k) {
+    #pragma unroll 4
+      for (int i = 0; i < 16; i++) perm[i] = (i * 5 + k) & 15;
+      int inv[16];
+    #pragma unroll 4
+      for (int i = 0; i < 16; i++) inv[perm[i]] = i;
+      int s = 0; for (int i = 0; i < 16; i++) s = s * 3 + inv[i]; return s; }"""
+
+    def native(k):
+        perm = [(i * 5 + k) & 15 for i in range(16)]
+        inv = [0] * 16
+        for i in range(16):
+            inv[perm[i]] = i
+        s = 0
+        for i in range(16):
+            s = _wrap(s * 3 + inv[i])
+        return s
+
+    c = lower(read_function(compile_c(src), "f"))
+    assert sum(b.pipelined for b in c.schedule.blocks) >= 2
+    for k in (0, 5, 11):
+        assert c.run(k) == native(k)
