@@ -52,6 +52,12 @@ static const int over_sprite[18] = {
     S_BLANK, S_BLANK, S_BLANK, S_BLANK, S_BLANK, S_PLATE, S_BLANK, S_HAND,
     S_BLANK, S_BLANK, S_BLANK, S_BLANK, S_BLANK, S_BLANK, S_BLANK, S_BLANK, S_BLANK, S_BLANK};
 /* Rotations: source pixel = rot0 + rotx * x + roty * y, facing east, south, west, north. */
+/* walk input (0 stop, 1 up, 2 right, 3 down, 4 left) -> step and facing;
+   hold input -> what it builds. Tables, not if/else chains: see draw_row. */
+static const int walk_dx[8] = {0, 0, 1, 0, -1, 0, 0, 0};
+static const int walk_dy[8] = {0, -1, 0, 1, 0, 0, 0, 0};
+static const int walk_dir[8] = {0, 3, 0, 1, 2, 0, 0, 0};
+static const int tool_kind[4] = {EMPTY, BELT, INSERTER, EMPTY};
 static const int rot0[4] = {0, 56, 63, 7};
 static const int rotx[4] = {1, -8, -1, 8};
 static const int roty[4] = {8, 1, -8, -1};
@@ -246,19 +252,21 @@ int game(int frames) {
         /* 1. the engineer */
         int w, h;
         read_input(&w, &h);
-        if (h != tool && h >= T_HAND && h <= T_ERASER) {
+        h &= 3;
+        w &= 7;
+        if (h != tool) {
             mark((TH - 1) * TW + tool);
             tool = h;
             mark((TH - 1) * TW + tool);
         }
-        int dx = (w == 2) - (w == 4), dy = (w == 3) - (w == 1);
+        int dx = walk_dx[w], dy = walk_dy[w];
         int nx = ex + dx, ny = ey + dy;
         nx = nx < 0 ? 0 : nx >= TW ? TW - 1 : nx;
         ny = ny < 0 ? 0 : ny >= TH - 1 ? TH - 2 : ny;
         if (nx != ex || ny != ey) {
             int t = ey * TW + ex;
             if (tool != T_HAND)
-                build(t, tool == T_BELT ? BELT : tool == T_INSERTER ? INSERTER : EMPTY, w == 2 ? 0 : w == 3 ? 1 : w == 4 ? 2 : 3);
+                build(t, tool_kind[tool], walk_dir[w]);
             mark(t);
             mark(ny * TW + nx);
             ex = nx;
