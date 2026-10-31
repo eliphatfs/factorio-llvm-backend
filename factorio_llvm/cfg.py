@@ -391,7 +391,10 @@ class _CfgLowerer(_Lowerer):
 
     def _tag(self, terminal: Connector, text: str, icon: str) -> None:
         """A display panel naming ``terminal``, on a green wire so it is placed next to it."""
-        tag = self.b.place(Panel(text=text, icon=icon, always_show=True, label=text))
+        # A wired panel shows only its messages, so give it one that always holds
+        # (signal-dot is never on the wire, so it reads 0).
+        always = Message(Cond(Sig("signal-dot", frozenset({GREEN})), "=", 0), icon, text)
+        tag = self.b.place(Panel([always], text=text, icon=icon, always_show=True, label=text))
         self.b.nl.net(GREEN, f"tag {text}").attach(terminal, tag.inp)
 
     def _keep(self, bs: BlockSchedule, r: Register, v: Operand, label: str) -> None:
