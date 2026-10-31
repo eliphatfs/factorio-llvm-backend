@@ -244,7 +244,7 @@ class Simulator:
                 elif isinstance(e, Decider):
                     new[id(e)] = eval_decider(e, self._inputs(e))
                 elif isinstance(e, Wall):
-                    new[id(e)] = {e.sensor: 1} if e.pressed else {}
+                    new[id(e)] = {e.sensor: 1} if e.pressed and e.sensor else {}
                 elif isinstance(e, (Constant, Pole, Lamp, Panel, Gate)):
                     new[id(e)] = {}
                 else:

@@ -24,12 +24,13 @@ def ir():
 
 def test_cage_has_eight_gates_and_walls(ir):
     c = lower(read_function(ir, "move"), screen_width=screen_width_of(ir))
-    walls = [e for e in c.netlist.entities if isinstance(e, Wall)]
-    gates = [e for e in c.netlist.entities if isinstance(e, Gate)]
+    walls = [e for e in c.netlist.entities if isinstance(e, Wall) and e.sensor]
+    gates = [e for e in c.netlist.entities if isinstance(e, Gate) and e.label.endswith(" gate")]
     assert sorted(w.sensor for w in walls) == sorted(JOYSTICK) and len(gates) == 8
-    tiles = {(int(e.position[0] // 1), int(e.position[1] // 1)) for e in walls + gates}
-    assert len(tiles) == 16
-    # Every gate's wall is in line with it.
+    # Five walls and a door round the player.
+    ring = [e for e in c.netlist.entities if isinstance(e, (Wall, Gate)) and not (e in walls or e in gates)]
+    assert len(ring) == 6 and len({e.position for e in ring}) == 6
+    # Every sensor gate's wall is next to it, in line with it.
     for g, w in zip(gates, walls):
         dx, dy = w.position[0] - g.position[0], w.position[1] - g.position[1]
         assert (dx == 0) == g.vertical and abs(dx) + abs(dy) == 1
@@ -52,9 +53,9 @@ def test_round_trip(ir):
     c = lower(read_function(ir, "move"), screen_width=8)
     back = import_string(export_string(c.netlist))
     assert check_reach(back) == []
-    walls = [e for e in back.entities if isinstance(e, Wall)]
+    walls = [e for e in back.entities if isinstance(e, Wall) and e.sensor]
     assert sorted(w.sensor for w in walls) == sorted(JOYSTICK)
-    assert sum(isinstance(e, Gate) for e in back.entities) == 8
+    assert sum(isinstance(e, Gate) for e in back.entities) == 9
 
 
 def test_needs_the_header():
