@@ -63,7 +63,7 @@ def test_chosen_io_signals_and_round_trip(ir):
     back = import_string(bp)
     assert check_reach(back) == []
     panels = [e for e in back.entities if isinstance(e, Panel)]
-    assert sorted(p.text for p in panels if not p.messages) == ["INPUT", "OUTPUT", "RESET (turn off to run)"]
+    assert sorted(p.text for p in panels if p.text) == ["INPUT", "OUTPUT", "RESET (turn off to run)"]
     assert all(p.always_show for p in panels)
     pos = {id(e): e.position for e in c.netlist.entities}
     by_pos = {e.position: e for e in back.entities}
