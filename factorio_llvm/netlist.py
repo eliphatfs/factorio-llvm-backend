@@ -132,9 +132,16 @@ class Message:
 
 @dataclass(eq=False)
 class Panel(Entity):
-    """A display panel: shows the first message whose condition holds."""
+    """A display panel: shows the first message whose condition holds.
+
+    With no messages it is a tag: it always shows ``icon`` and ``text``.
+    ``always_show`` keeps the text visible above it outside Alt mode too.
+    """
 
     messages: list[Message] = field(default_factory=list)
+    text: str = ""
+    icon: str | None = None
+    always_show: bool = False
 
 
 @dataclass(eq=False)

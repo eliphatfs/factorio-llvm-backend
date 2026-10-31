@@ -223,6 +223,15 @@ def to_blueprint(netlist: Netlist, label: str = "factorio-llvm") -> dict[str, An
         }
         if not isinstance(e, Pole):
             ent["control_behavior"] = _control_behavior(e)
+        if isinstance(e, Lamp):
+            ent["always_on"] = True  # lit in daylight too
+        if isinstance(e, Panel):
+            if e.text:
+                ent["text"] = e.text
+            if e.icon:
+                ent["icon"] = _signal(e.icon)
+            if e.always_show:
+                ent["always_show"] = True
         if e.label:
             ent["player_description"] = e.label
         entities.append(ent)
@@ -282,7 +291,8 @@ def _entity_in(d: dict[str, Any]) -> Entity:
         return Lamp(_cond_in(cb["circuit_condition"]), label=label, position=pos)
     if name == "display-panel":
         msgs = [Message(_cond_in(m["condition"]), m["icon"]["name"], m.get("text", "")) for m in cb.get("parameters", [])]
-        return Panel(msgs, label=label, position=pos)
+        icon = d.get("icon", {}).get("name")
+        return Panel(msgs, d.get("text", ""), icon, bool(d.get("always_show")), label=label, position=pos)
     if name == "constant-combinator":
         signals: dict[str, int] = {}
         for section in cb.get("sections", {}).get("sections", []):

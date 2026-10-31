@@ -250,6 +250,7 @@ class _CfgLowerer(_Lowerer):
         # stays at 1. Blueprints are placed with it on; turn it off to run.
         reset_signal = self.b.reserve(RESET)
         reset = self.b.place(Constant({reset_signal: -1}, label="RESET: turn off to run"), (), RED)
+        self._tag(reset.out, "RESET (turn off to run)", "signal-R")
         self.b.place(
             Arithmetic(
                 Sig(self.step, frozenset({RED})), "*", Sig(reset_signal, frozenset({RED})), self.step, label="reset"
@@ -321,6 +322,7 @@ class _CfgLowerer(_Lowerer):
         self.b.group = "io"
         output = self.b.nl.net(RED, "OUTPUT")
         out_terminal = self.b.place(Constant({}, label="OUTPUT: wire the factory here"), (), output)
+        self._tag(out_terminal.out, "OUTPUT", "signal-O")
         port = Decider(
             [self._ge(halt)],
             [Out(result.signal, networks=RED), Out(DONE, copy=False)],
@@ -335,6 +337,7 @@ class _CfgLowerer(_Lowerer):
                 Message(Cond(s, ">", 1), "signal-hourglass", "running"),
             ],
             label="status",
+            always_show=True,
         )
         self.b.place(status, (RED,))
         inputs, in_terminal, io = None, None, {}
@@ -343,6 +346,7 @@ class _CfgLowerer(_Lowerer):
             if any(bank.is_input for bank in self.mem.banks.values()):
                 inputs = self.b.nl.net(RED, "INPUT")
                 in_terminal = self.b.place(Constant({}, label="INPUT: wire the factory here"), (), inputs)
+                self._tag(in_terminal.out, "INPUT", "signal-I")
             self.mem.build(inputs, output, self.screen_width)
         unknown = set(self.io_choice) - set(io)
         if unknown:
@@ -384,6 +388,11 @@ class _CfgLowerer(_Lowerer):
         for st in self.stores:
             needed += [st.address, st.value]
         return _depth(*(x.index if isinstance(x, Ptr) else x for x in needed))
+
+    def _tag(self, terminal: Connector, text: str, icon: str) -> None:
+        """A display panel naming ``terminal``, on a green wire so it is placed next to it."""
+        tag = self.b.place(Panel(text=text, icon=icon, always_show=True, label=text))
+        self.b.nl.net(GREEN, f"tag {text}").attach(terminal, tag.inp)
 
     def _keep(self, bs: BlockSchedule, r: Register, v: Operand, label: str) -> None:
         if not any(w.register is r for w in bs.writes):
