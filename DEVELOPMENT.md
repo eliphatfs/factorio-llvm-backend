@@ -78,7 +78,11 @@ may point into different arrays, other element types, `memcpy`.
 
 M4 I/O. Every stepped blueprint has an **OUTPUT** terminal (an empty constant
 combinator to wire the factory to): once halted it carries the result and
-`signal-check = 1`. A display panel shows the status: reset, running or done. `extern` arrays are memory-mapped I/O
+`signal-check = 1`. A display panel shows the status: reset, running or done.
+With a screen, `_controls_under_screen` fixes the status panel and the
+terminals (each under its tag panel) in a row at y = 0.5 / 1.5 under the
+screen, and `place` shifts the circuit's cells down below any fixed entity in
+that corner. `extern` arrays are memory-mapped I/O
 (see `examples/m4.c`): one the program only reads is an input, word `i` read
 live from signal `i` on the **INPUT** terminal's red wire (use `volatile` so
 clang re-reads it); one it writes is an output, every word shown on the OUTPUT

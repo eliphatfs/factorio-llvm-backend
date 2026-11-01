@@ -170,8 +170,11 @@ def _expr_true(conds: list[Cond], inp: _Inputs, each: str | None) -> bool:
 
 def _emit(outs: list[Out], inp: _Inputs, out: defaultdict[str, int], each: str | None) -> None:
     for o in outs:
-        if o.signal == EACH:
-            names = [each] if each is not None else inp.signals(o.networks)
+        if o.signal == EVERYTHING:
+            for s in inp.signals(o.networks):
+                _add(out, s, inp.get(s, o.networks) if o.copy else o.constant)
+        elif o.signal == EACH:
+            names = [each]
             for s in names:
                 _add(out, s, inp.get(s, o.networks) if o.copy else o.constant)
         else:

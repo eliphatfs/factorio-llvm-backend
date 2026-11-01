@@ -117,15 +117,21 @@ def place(netlist: Netlist, per_cell: int = SLOTS_PER_CELL) -> list[Pole]:
     entities = _ordered([e for e in netlist.entities if not isinstance(e, Pole) and id(e) not in fixed_ids])
     ncells = max(1, math.ceil(len(entities) / per_cell))
     width = max(1, math.ceil(math.sqrt(ncells)))
+    # Fixed entities in the circuit's corner (the controls under the screen)
+    # push the circuit's cells down below them.
+    below = [e.position[1] for e in fixed if not isinstance(e, Pole) and e.position[0] >= 0 and e.position[1] >= 0]
+    shift = math.floor(max(below)) + 2 if below else 0
     slots = _cell_slots()
     poles = []
     for k, (sx, sy) in enumerate(SITES):
         for i in range(ncells):
             ox, oy = _cell_origin(i, width)
+            oy += shift
             poles.append(Pole(label="substation", position=(ox + sx + 1.0, oy + sy + 1.0), group="power" if k == 0 else "relay"))
     for n, e in enumerate(entities):
         cell, k = divmod(n, per_cell)
         ox, oy = _cell_origin(cell, width)
+        oy += shift
         col, rp = slots[k * SLOTS_PER_CELL // per_cell]
         if isinstance(e, (Constant, Lamp, Panel, Wall, Gate)):
             e.position = (ox + col + 0.5, oy + 2 * rp + 0.5)
@@ -195,7 +201,7 @@ class _Router:
     def _relay(self, a: Connector, b: Connector, net: Net) -> None:
         # A screen's lamps are all joined by short wires, so the relay may
         # start from whichever lamp of the net is nearest a free substation.
-        froms = [m for m in net.members if m.entity.group == FIXED] if a.entity.group == FIXED else [a]
+        froms = [m for m in net.members if isinstance(m.entity, Lamp)] if isinstance(a.entity, Lamp) else [a]
         start_at: dict[int, Connector] = {}
         for m in froms:
             for i, p in enumerate(self.poles):

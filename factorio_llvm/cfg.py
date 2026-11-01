@@ -29,8 +29,9 @@ from dataclasses import dataclass, field
 from .frontend import _array_of, Array, Block, Function, Op, Operand, Unsupported, Value
 from .fuse import Bool, pieces
 from .lower import GATE, PRIVATE_CONSTANT, STABLE, Lowered, Wire, _Builder, _colors, _depth, _early, _Lowerer, _operand, _vary
-from .signals import EACH, rich_text
+from .signals import EACH, EVERYTHING, rich_text
 from .netlist import GREEN, RED, Arithmetic, Cond, Connector, Constant, Decider, Message, Net, Netlist, Out, Panel, Sig
+from .layout import FIXED
 from .memory import ADDRESS, STORE_LANDS, Memory, Ptr
 from .schedule import GATE_TO_LATCH, BlockSchedule, Jump, Load, Register, Schedule, Store, Test, Write
 from .sim import Simulator, wrap
@@ -412,7 +413,7 @@ class _CfgLowerer(_Lowerer):
         # stays at 1. Blueprints are placed with it on; turn it off to run.
         reset_signal = self.reset_signal
         reset = self.b.place(Constant({reset_signal: -1}, label="RESET: turn off to run"), (), RED)
-        self._tag(reset.out, "RESET (turn off to run)", "signal-R")
+        self.controls = [(reset, self._tag(reset.out, "RESET (turn off to run)", "signal-R"))]
         self.b.place(
             Arithmetic(
                 Sig(self.step, frozenset({RED})), "*", Sig(reset_signal, frozenset({RED})), self.step, label="reset"
@@ -425,7 +426,7 @@ class _CfgLowerer(_Lowerer):
         for p in self.fn.params:
             s = self.b.signal()
             params.append(self.b.place(Constant({s: 0}, label=f"argument %{p.name} = {rich_text(s)}"), (), RED, group="arguments"))
-            self.b.tag(params[-1].out, f"argument %{p.name}", s, group="arguments")
+            self.controls.append((params[-1], self.b.tag(params[-1].out, f"argument %{p.name}", s, group="arguments")))
             param_signals.append(s)
             self.env[id(p)] = Wire(s, 0, RED, early=STABLE, vary=-STABLE)
             self.names[p.name] = s
@@ -501,7 +502,8 @@ class _CfgLowerer(_Lowerer):
         self.b.group = "io"
         output = self.b.nl.net(RED, "OUTPUT")
         out_terminal = self.b.place(Constant({}, label=f"OUTPUT: wire the factory here. Result = {rich_text(result.signal)}, done = {rich_text(DONE)}"), (), output)
-        self._tag(out_terminal.out, "OUTPUT", "signal-O")
+        self.controls.insert(1, (out_terminal, self._tag(out_terminal.out, "OUTPUT", "signal-O")))
+        n_fixed = 2  # RESET, OUTPUT; then the inputs, then the arguments
         port = Decider(
             [self._ge(halt)],
             [Out(result.signal, networks=RED), Out(DONE, copy=False)],
@@ -519,6 +521,8 @@ class _CfgLowerer(_Lowerer):
             always_show=True,
         )
         self.b.place(status, (RED,))
+        self.controls.insert(0, (None, status))
+        n_fixed += 1
         inputs, in_terminal, io = None, None, {}
         if self.mem is not None:
             io = self.mem.assign_io(self.io_choice, {result.signal, DONE})
@@ -537,8 +541,11 @@ class _CfgLowerer(_Lowerer):
                     name = "INPUT" if len(groups) == 1 else f"INPUT @{g[0].array.name}"
                     label = f"{name}: wire the factory here, or set values here.\n" + _io_lines(g)
                     terminal = self.b.place(Constant(zeros, label=label), (), inputs)
+                    tag = None
                     if in_terminal is None:  # one panel marks the input area
-                        self._tag(terminal.out, "INPUT", "signal-I")
+                        tag = self._tag(terminal.out, "INPUT", "signal-I")
+                    self.controls.insert(n_fixed, (terminal, tag))
+                    n_fixed += 1
                     in_terminal = in_terminal or terminal
                     for b in g:
                         self.input_terminals[b.array.name] = terminal
@@ -551,6 +558,8 @@ class _CfgLowerer(_Lowerer):
                 copy.left = Sig(bank.io[i], frozenset({RED}))
                 (self.mem.joystick if bank.is_joystick else self.mem.clock if bank.is_clock else inputs).attach(copy.inp)
             self._snapshot_inputs(sched, inputs)
+            if any(b.is_screen for b in banks):
+                self._controls_under_screen()
         unknown = set(self.io_choice) - set(io)
         if unknown:
             raise Unsupported(f"--io names no extern array: {sorted(unknown)}")
@@ -604,9 +613,9 @@ class _CfgLowerer(_Lowerer):
             self.b.place(Arithmetic(Sig(EACH, frozenset({RED})), "+", 0, EACH, label=f"{live.name} -> snapshot"), (), fresh)
             fresh_copy = fresh.members[-1].entity
             live.attach(fresh_copy.inp)
-            holder = self.b.place(Decider(hold, [Out(EACH, networks=GREEN)], label=f"{live.name} snapshot: hold"), (RED,), snap)
+            holder = self.b.place(Decider(hold, [Out(EVERYTHING, networks=GREEN)], label=f"{live.name} snapshot: hold"), (RED,), snap)
             snap.attach(holder.inp)
-            sampler = self.b.place(Decider(hold, [], else_outputs=[Out(EACH, networks=GREEN)], label=f"{live.name} snapshot: follow"), (RED,), snap)
+            sampler = self.b.place(Decider(hold, [], else_outputs=[Out(EVERYTHING, networks=GREEN)], label=f"{live.name} snapshot: follow"), (RED,), snap)
             fresh.attach(sampler.inp)
             for copy in copies:
                 live.members.remove(copy.inp)
@@ -759,8 +768,18 @@ class _CfgLowerer(_Lowerer):
         raw = self.get_raw(t.cond)
         return raw if isinstance(raw, Bool) and raw.memo is None else None
 
-    def _tag(self, terminal: Connector, text: str, icon: str) -> None:
-        self.b.tag(terminal, text, icon)
+    def _controls_under_screen(self) -> None:
+        """Put the status panel and the terminals in a row just under the
+        screen's bottom-left corner, each terminal with its panel right above
+        it, so they are easy to find; the circuit's cells start below them."""
+        for i, (e, panel) in enumerate(self.controls):
+            x = 1.5 + 2 * i
+            for ent, y in ((panel, 0.5), (e, 1.5)):
+                if ent is not None:
+                    ent.position, ent.group = (x, y), FIXED
+
+    def _tag(self, terminal: Connector, text: str, icon: str) -> Panel:
+        return self.b.tag(terminal, text, icon)
 
     def _keep(self, bs: BlockSchedule, r: Register, v: Operand, label: str) -> None:
         if not any(w.register is r for w in bs.writes):

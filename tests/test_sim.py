@@ -198,3 +198,14 @@ def test_run_until():
     assert sim.run_until(lambda s: s.read(cnt.bus, "signal-S") == 10) == 9
     with pytest.raises(TimeoutError):
         sim.run_until(lambda s: False, max_ticks=5)
+
+
+def test_each_output_needs_each_condition():
+    """The game offers an Each output only with an Each condition."""
+    import pytest
+
+    from factorio_llvm.netlist import Cond, Decider, Out, Sig
+
+    with pytest.raises(ValueError):
+        Decider([Cond(Sig("signal-S"), ">", 0)], [Out("signal-each")])
+    Decider([Cond(Sig("signal-S"), ">", 0)], [Out("signal-everything")])
