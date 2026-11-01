@@ -265,7 +265,7 @@ static inline int neighbour(int t, int d) {
     return x >= 0 && x < TW && y >= 0 && y < TH - 1 ? y * TW + x : OFF;
 }
 
-static inline void build(int t, int k, int d) {
+__attribute__((always_inline)) static inline void build(int t, int k, int d) {
     int old = kind[t];
     if (old == CHEST) return;
     if (old != k) {
@@ -343,6 +343,11 @@ int game(int frames) {
         int nx = ex + dx, ny = ey + dy;
         nx = nx < 0 ? 0 : nx >= TW ? TW - 1 : nx;
         ny = ny < 0 ? 0 : ny >= TH - 1 ? TH - 2 : ny;
+        int blocked = kind[ny * TW + nx] == CHEST;
+        if (blocked) { /* chests block the way */
+            nx = ex;
+            ny = ey;
+        }
         /* The engineer's tile is redrawn only when they move, turn or stop,
            so standing still costs nothing. */
         int nface = w >= 1 && w <= 4 ? walk_dir[w] : face;
@@ -360,6 +365,12 @@ int game(int frames) {
             mark(ny * TW + nx);
             ex = nx;
             ey = ny;
+        } else if (blocked && tool != T_HAND) {
+            /* Walking into a chest builds on the engineer's own tile, facing
+               the chest: how to put an inserter (or a belt) into one. */
+            int t = ey * TW + ex, k = tool_kind[tool], d = walk_dir[w];
+            if (kind[t] != k || dir[t] != d)
+                build(t, k, d);
         }
 
         /* 2. inserters: grab from behind, drop in front */
