@@ -97,9 +97,11 @@ class Load:
     port: int
     address: Lowered
     source: str = ""
+    lead: int = 0  # also drive it in each predecessor's last ``lead`` steps (an early load)
 
     def __str__(self) -> str:
-        return f"read {self.array}[{_show(self.address, self.source)}] on port {self.port}"
+        early = f"  (from {self.lead} steps before, in the predecessors)" if self.lead else ""
+        return f"read {self.array}[{_show(self.address, self.source)}] on port {self.port}{early}"
 
 
 @dataclass
