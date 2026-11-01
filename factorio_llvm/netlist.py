@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Iterable, Literal, Union
 
-from .signals import EACH, WILDCARDS, signal_type
+from .signals import EACH, EVERYTHING, WILDCARDS, signal_type
 
 
 class Color(str, Enum):
@@ -245,8 +245,8 @@ class Decider(Entity):
         if len(wild) > 1:
             raise ValueError("a decider may use only one kind of wildcard in its conditions")
         for o in (*self.outputs, *self.else_outputs):
-            if o.signal in WILDCARDS and o.signal != EACH:
-                raise ValueError("only Each is supported as a wildcard output")
+            if o.signal in WILDCARDS and o.signal != EACH and not (o.signal == EVERYTHING and not self.each_condition):
+                raise ValueError("only Each (or Everything, without an Each condition) is supported as a wildcard output")
 
     @property
     def each_condition(self) -> bool:

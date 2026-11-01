@@ -1,4 +1,4 @@
-/* One full lamp block: 395 pixels on a 20-wide screen, each on its own signal.
+/* One full lamp block: 394 pixels on a 20-wide screen, each on its own signal.
  * Every lamp should light; pixel i gets a distinct non-zero colour.
  * Build: python -m factorio_llvm examples/allsignals.c --screen-width 20
  *
@@ -29,25 +29,25 @@
  *   row  9, col  4: overflow-valve
  *   row 10, col  7: proxy-container
  *   row 11, col  5: rocket-part
- *   row 11, col  8: science
- *   row 11, col  9: selection-tool
- *   row 16, col 15: simple-entity-with-force
- *   row 16, col 16: simple-entity-with-owner
- *   row 17, col  8: spidertron-remote
- *   row 17, col  9: spidertron-rocket-launcher-1
- *   row 17, col 10: spidertron-rocket-launcher-2
- *   row 17, col 11: spidertron-rocket-launcher-3
- *   row 17, col 12: spidertron-rocket-launcher-4
- *   row 18, col 12: tank-cannon
- *   row 18, col 13: tank-flamethrower
- *   row 18, col 14: tank-machine-gun
- *   row 18, col 15: top-up-valve
- *   row 19, col 10: vehicle-machine-gun
+ *   row 11, col  7: science
+ *   row 11, col  8: selection-tool
+ *   row 16, col 14: simple-entity-with-force
+ *   row 16, col 15: simple-entity-with-owner
+ *   row 17, col  7: spidertron-remote
+ *   row 17, col  8: spidertron-rocket-launcher-1
+ *   row 17, col  9: spidertron-rocket-launcher-2
+ *   row 17, col 10: spidertron-rocket-launcher-3
+ *   row 17, col 11: spidertron-rocket-launcher-4
+ *   row 18, col 11: tank-cannon
+ *   row 18, col 12: tank-flamethrower
+ *   row 18, col 13: tank-machine-gun
+ *   row 18, col 14: top-up-valve
+ *   row 19, col  9: vehicle-machine-gun
  */
-extern volatile int screen[395];
+extern volatile int screen[394];
 
 int main(void) {
-    for (int i = 0; i < 395; i++)
+    for (int i = 0; i < 394; i++)
         screen[i] = 0x100000 + i * 0x2713;
     return 0;
 }

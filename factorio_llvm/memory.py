@@ -1,6 +1,6 @@
 """Fixed-size arrays (M3): chunked "each" memories, read ports, bus writes.
 
-Chunks. An array is cut into chunks of CHUNK words (every usable signal, 395).
+Chunks. An array is cut into chunks of CHUNK words (every usable signal, 394).
 Word ``i`` is signal ``sigs[i % CHUNK]`` of chunk ``i // CHUNK``; external
 arrays use their I/O signals, so they are one chunk. Each chunk has:
 
@@ -9,14 +9,19 @@ arrays use their I/O signals, so they are one chunk. Each chunk has:
   signal = its address + 1 (addresses travel as address + 1, so word 0 is not
   an absent signal);
 - a *cell* decider on the loop: each word passes unless masked;
-- a *write mask* decider: ``each(key) == A`` and ``E == array id`` (a store),
-  or ``E == -array id`` (clear) or ``S <= 1`` (reset) -> each = 1, onto a
-  private red net read by the cell;
-- a *writer*: the bus's ``V`` delayed one tick, times the mask, onto the loop.
+- a *key gate*: passes the key on only while the bus holds a
+  store to this chunk (``E == array id`` and ``A`` in its range), a clear or
+  reset, so the mask scans an empty net on idle ticks (a 394-signal each scan
+  every tick per chunk and port was most of the game's update time);
+- a *write mask* decider on the gated key and the bus a tick late:
+  ``each(key) == A`` and ``E == array id`` (a store), or ``E == -array id``
+  (clear) or ``S <= 1`` (reset) -> each = 1, onto a private red net read by
+  the cell;
+- a *writer*: the bus's ``V`` delayed two ticks, times the mask, onto the loop.
   The cell drops the old word the tick the writer puts the new one, and keeps
   it from then on;
 - with non-zero initial values, a *seed* decider that puts them onto the
-  loop while ``S <= 2`` (one tick past the mask, so the cell keeps them).
+  loop while ``S <= 3`` (one tick past the mask, so the cell keeps them).
 
 A read-only array (a constant global) is a ROM: one constant combinator per
 chunk with the non-zero words, as its loop.
@@ -30,7 +35,7 @@ and stores one step apart to one word leave the later value. The ``k``-th
 store of a wave uses write port ``k``: port 0 is ``A``/``V``/``E``, later ports
 get bus signals of their own, and each chunk the port writes has its own mask,
 delayed value and writer (with several ports, a second copy of each mask
-feeds the cell). The word is on the loop three ticks after its wave, before
+feeds the cell). The word is on the loop four ticks after its wave, before
 the next block can read it; a block ends before a load of an array it wrote.
 
 Read port. Port ``j`` of an array has an address net (red for even ports,
@@ -53,7 +58,7 @@ Screen. A written extern array whose name starts with ``screen`` is a
 display instead: a grid of lamps (``screen_width`` wide, any size), each
 showing its word as a packed 0xRRGGBB colour. The grid sits above the rest of
 the layout. Each chunk's lamps are one block on that chunk's loop (they reuse
-the same 395 signals): lamps wire to their neighbours, and the router takes the
+the same 394 signals): lamps wire to their neighbours, and the router takes the
 block out through the ring of substations around the screen. Substations
 inside the screen, only where power needs them, take 2x2 lamps each.
 """
@@ -67,14 +72,14 @@ from .frontend import Unsupported
 from .layout import screen_poles
 from .lower import Lowered, Wire, _Builder, _early, _reads, _vary
 from .netlist import GREEN, RED, Color, Arithmetic, Cond, Constant, Decider, Gate, Lamp, Net, Out, Pole, Sig, Wall
-from .signals import EACH, allocatable_signals
+from .signals import EACH, EVERYTHING, allocatable_signals
 
 ADDRESS = "signal-A"
 VALUE = "signal-V"
 ENABLE = "signal-E"
 LOAD_LATENCY = 5  # ticks from a settled address to the loaded value
 READ_TO_RESULT = 2  # the reader samples the chunk loop this many ticks before the loaded value is out
-STORE_LANDS = 3  # a store sampled at tick k is on the chunk loop from tick k + 3
+STORE_LANDS = 4  # a store sampled at tick k is on the chunk loop from tick k + 4
 
 
 def _merge_reads(x: tuple, y: tuple) -> tuple:
@@ -146,6 +151,16 @@ class Memory:
         # store in a block, so a block's stores go out together.
         self.write_signals: list[tuple[str, str, str]] = [(ADDRESS, VALUE, ENABLE)]
         self.banks = {id(a): _Bank(a, i + 1) for i, a in enumerate(arrays)}
+    def _gate(self, key_net: Net, conds: list[Cond], label: str, group: str) -> Net:
+        """Pass the chunk's key on only while ``conds`` hold (a store or load
+        that may touch the chunk). Masks are each-deciders over the key: fed
+        a constant 394-signal key they scan it every tick (a screen has 16
+        ports x 125 chunks of them, most of the game's update time); behind the gate they scan an empty net."""
+        out = self.b.nl.net(RED, label)
+        gate = Decider(conds, [Out(EVERYTHING, networks=key_net.color)], label=label)
+        self.b.place(gate, (RED,), out, group)
+        key_net.attach(gate.inp)
+        return out
 
     def write_port(self, a: Array, p: int) -> tuple[str, str, str]:
         """The bus signals of write port ``p``, which ``a`` is stored through."""
@@ -278,10 +293,16 @@ class Memory:
         for (name, j), members in plan:
             start, d = sides[name]
             y = top + 2 * j
-            # The cell (on the loop) first, nearest the lamps, then the rest in
-            # the order built (key, then each port's masks, delay and writer),
-            # so every net of the chunk runs between near neighbours.
-            order = sorted(members, key=lambda e: 0 if e.label.endswith("..]") else 1)
+            # The cell (on the loop) first, nearest the lamps, then each port's
+            # masks and writer (also on the loop), then the rest (the key,
+            # its gate and the delays), so every net of the chunk runs between
+            # near neighbours.
+            def rank(e) -> int:
+                if e.label.endswith("..]"):
+                    return 0
+                return 1 if " write mask " in e.label or " writer " in e.label else 2
+
+            order = sorted(members, key=rank)
             col = start
             for e in order:
                 while blocked(name, col, y):
@@ -405,30 +426,53 @@ class Memory:
         key_net = self._key(a, base, words, group)
         mask = self.b.nl.net(RED, f"{name} write mask")
         ports = sorted(bank.write_ports | {0})
+        n = len(words)
+        always = [Cond(s_red, "=", 0), Cond(s_red, "!=", 0, join="or")]
+        # The bus signals the masks read a tick late, and the values the
+        # writers read two ticks late, on one green net of the chunk's own
+        # (deciders on fixed signals are cheap, unlike an each scan).
+        late = self.b.nl.net(GREEN, f"{name} bus (late)")
+        late_sigs = [self.step] + [x for p in ports for x in (self.write_signals[p][0], self.write_signals[p][2])]
+        self.b.place(Decider(always, [Out(x, networks=RED) for x in late_sigs], label=f"{name} bus (delay)"), (RED,), late, group)
+        v1 = self.b.nl.net(GREEN, f"{name} values (1 tick late)")
+        vsigs = [self.write_signals[p][1] for p in ports]
+        self.b.place(Decider(always, [Out(x, networks=RED) for x in vsigs], label=f"{name} values (delay)"), (RED,), v1, group)
+        g_always = [Cond(Sig(vsigs[0], frozenset({GREEN})), "=", 0), Cond(Sig(vsigs[0], frozenset({GREEN})), "!=", 0, join="or")]
+        delay2 = Decider(g_always, [Out(x, networks=GREEN) for x in vsigs], label=f"{name} values (delay 2)")
+        self.b.place(delay2, (), late, group)
+        v1.attach(delay2.inp)
+        # One gate for all ports (the key must reach the masks once): open on
+        # a store by any port to this chunk, a clear, or reset. It reads the
+        # bus; the masks a tick later read the late bus.
+        gate_conds = [Cond(s_red, "<=", 1)]
+        for p in ports:
+            sig_a, _, sig_e = self.write_signals[p]
+            e, addr = Sig(sig_e, frozenset({RED})), Sig(sig_a, frozenset({RED}))
+            gate_conds += [Cond(e, "=", bank.id, join="or"), Cond(addr, ">", base), Cond(addr, "<=", base + n), Cond(e, "=", -bank.id, join="or")]
+        gated = self._gate(key_net, gate_conds, f"{name} key gate", group)
         for p in ports:
             sig_a, sig_v, sig_e = self.write_signals[p]
-            e = Sig(sig_e, frozenset({RED}))
+            e = Sig(sig_e, frozenset({GREEN}))
+            addr = Sig(sig_a, frozenset({GREEN}))
             conds = [
-                Cond(Sig(EACH, frozenset({GREEN})), "=", Sig(sig_a, frozenset({RED}))),
+                Cond(Sig(EACH, frozenset({RED})), "=", addr),
                 Cond(e, "=", bank.id),
                 Cond(e, "=", -bank.id, join="or"),
             ]
             if p == 0:
-                conds.append(Cond(s_red, "<=", 1, join="or"))
+                conds.append(Cond(Sig(self.step, frozenset({GREEN})), "<=", 1, join="or"))
             # The cell reads every port's mask on one net; with several ports,
             # each writer needs its own copy.
             own = mask if len(ports) == 1 else self.b.nl.net(RED, f"{name} write mask {p}")
             for net in {id(mask): mask, id(own): own}.values():
                 write_mask = Decider(conds, [Out(EACH, copy=False, constant=1)], label=f"{name} write mask {p}")
-                self.b.place(write_mask, (RED,), net, group)
-                key_net.attach(write_mask.inp)
-            delayed = self.b.nl.net(GREEN, f"{name} value {p}")
-            delay = Arithmetic(Sig(sig_v, frozenset({RED})), "+", 0, VALUE, label=f"{name} value {p} (delay)")
-            self.b.place(delay, (RED,), delayed, group)
-            writer = Arithmetic(Sig(EACH, frozenset({RED})), "*", Sig(VALUE, frozenset({GREEN})), EACH, label=f"{name} writer {p}")
+                self.b.place(write_mask, (), net, group)
+                gated.attach(write_mask.inp)
+                late.attach(write_mask.inp)
+            writer = Arithmetic(Sig(EACH, frozenset({RED})), "*", Sig(sig_v, frozenset({GREEN})), EACH, label=f"{name} writer {p}")
             self.b.place(writer, (), loop, group)
             own.attach(writer.inp)
-            delayed.attach(writer.inp)
+            late.attach(writer.inp)
         cell = Decider(
             [Cond(Sig(EACH, frozenset({GREEN})), "!=", 0), Cond(Sig(EACH, frozenset({RED})), "=", 0)],
             [Out(EACH, networks=GREEN)],
@@ -439,7 +483,7 @@ class Memory:
         mask.attach(cell.inp)
         init = [Out(s, copy=False, constant=v) for s, v in words if v]
         if init:
-            self.b.place(Decider([Cond(s_red, "<=", 2)], init, label=f"{name} init"), (RED,), loop, group)
+            self.b.place(Decider([Cond(s_red, "<=", 3)], init, label=f"{name} init"), (RED,), loop, group)
         if a.external and not bank.is_screen:
             pin = Arithmetic(Sig(EACH, frozenset({GREEN})), "+", 0, EACH, label=f"{name} -> OUTPUT")
             self.b.place(pin, (), outputs, group)

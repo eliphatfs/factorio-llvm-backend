@@ -6,7 +6,7 @@ from factorio_llvm.signals import allocatable_signals, signal_type
 
 def test_signal_catalog():
     names = allocatable_signals()
-    assert len(names) == 395
+    assert len(names) == 394
     assert names[0] == "signal-A"
     assert signal_type("iron-plate") == "item"
     assert signal_type("water") == "fluid"

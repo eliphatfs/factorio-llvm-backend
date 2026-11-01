@@ -133,7 +133,7 @@ def test_reset_holds_and_reruns(ir):
 
 
 def test_large_program_is_laid_out_and_routed(tmp_path):
-    # Four blocks of ~270 values each: more than the 395 signals one net can
+    # Four blocks of ~270 values each: more than the 394 signals one net can
     # name, so this needs the per-block local nets and substation relays.
     lines = ["int big(int a, int b) { int x = a, y = b;"]
     for blk in range(4):

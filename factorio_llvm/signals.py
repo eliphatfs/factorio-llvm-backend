@@ -39,12 +39,19 @@ def is_known(name: str) -> bool:
     return name in _catalog()
 
 
+# Base-game signals that Space Age deletes (its base-data-updates.lua removes
+# the satellite item). A blueprint using one loses those entities on import
+# with Space Age on, so they are never allocated.
+SPACE_AGE_REMOVED = frozenset({"satellite"})
+
+
 def allocatable_signals() -> list[str]:
-    """Every concrete (non-wildcard) signal, in a stable order.
+    """Every concrete (non-wildcard) signal that exists with and without Space
+    Age, in a stable order.
 
     Virtual letters and digits come first so small netlists stay readable in game.
     """
-    names = [n for n in _catalog() if n not in WILDCARDS]
+    names = [n for n in _catalog() if n not in WILDCARDS and n not in SPACE_AGE_REMOVED]
     letters = [f"signal-{c}" for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"]
     rest = sorted(n for n in names if n not in letters)
     return letters + rest
