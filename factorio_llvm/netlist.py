@@ -256,6 +256,16 @@ class Decider(Entity):
         return any(c.left.name == EACH for c in self.conditions)
 
 
+@dataclass(eq=False)
+class Selector(Entity):
+    """Selector combinator in "select input" mode: of its input signals (red
+    and green summed), sorted by value (largest first with ``select_max``),
+    output the one at ``index`` with its value."""
+
+    select_max: bool = True
+    index: int = 0
+
+
 # --------------------------------------------------------------------------- wiring
 
 

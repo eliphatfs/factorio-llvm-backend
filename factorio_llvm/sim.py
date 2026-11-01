@@ -26,6 +26,7 @@ from .netlist import (
     Connector,
     Constant,
     Decider,
+    Selector,
     Entity,
     Gate,
     Lamp,
@@ -183,6 +184,15 @@ def _emit(outs: list[Out], inp: _Inputs, out: defaultdict[str, int], each: str |
             _add(out, o.signal, inp.get(src, o.networks) if o.copy else o.constant)
 
 
+def eval_selector(c: Selector, inp: _Inputs) -> Signals:
+    vals = [(inp.get(n), n) for n in inp.signals()]
+    vals.sort(key=lambda x: -x[0] if c.select_max else x[0])
+    if c.index < 0 or c.index >= len(vals):
+        return {}
+    v, n = vals[c.index]
+    return {n: v}
+
+
 def eval_decider(c: Decider, inp: _Inputs) -> Signals:
     out: defaultdict[str, int] = defaultdict(int)
     if c.each_condition:
@@ -249,9 +259,9 @@ class Simulator:
         self.net_of = netlist.nets()
         self.outputs: dict[int, Signals] = {id(e): {} for e in netlist.entities}
         # Only these ever drive a wire; lamps, poles, panels and gates do not.
-        self._drivers = [e for e in netlist.entities if isinstance(e, (Arithmetic, Decider, Wall, Constant))]
+        self._drivers = [e for e in netlist.entities if isinstance(e, (Arithmetic, Decider, Selector, Wall, Constant))]
         for e in netlist.entities:
-            if not isinstance(e, (Arithmetic, Decider, Wall, Constant, Pole, Lamp, Panel, Gate)):
+            if not isinstance(e, (Arithmetic, Decider, Selector, Wall, Constant, Pole, Lamp, Panel, Gate)):
                 raise TypeError(f"cannot simulate {type(e).__name__}")
         self.tick = 0
         self._nets = self._compute_nets()
@@ -296,6 +306,8 @@ class Simulator:
                     new[id(e)] = eval_arithmetic(e, self._inputs(e))
                 elif isinstance(e, Decider):
                     new[id(e)] = eval_decider(e, self._inputs(e))
+                elif isinstance(e, Selector):
+                    new[id(e)] = eval_selector(e, self._inputs(e))
                 elif isinstance(e, Wall):
                     new[id(e)] = {e.sensor: 1} if e.pressed and e.sensor else {}
             self.outputs = new

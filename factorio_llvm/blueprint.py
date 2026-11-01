@@ -29,6 +29,7 @@ from .netlist import (
     Message,
     Panel,
     Decider,
+    Selector,
     Entity,
     Pole,
     Netlist,
@@ -152,6 +153,8 @@ def _control_behavior(e: Entity) -> dict[str, Any]:
                 {"condition": _plain_cond(m.condition), "icon": _signal(m.icon), "text": m.text} for m in e.messages
             ]
         }
+    if isinstance(e, Selector):
+        return {"operation": "select", "select_max": e.select_max, "index_constant": e.index}
     if isinstance(e, Decider):
         dc: dict[str, Any] = {
             "conditions": [_cond(i, c) for i, c in enumerate(e.conditions)],
@@ -163,7 +166,7 @@ def _control_behavior(e: Entity) -> dict[str, Any]:
     raise TypeError(type(e).__name__)
 
 
-_PROTOTYPE = {Wall: "stone-wall", Gate: "gate", Panel: "display-panel", Lamp: "small-lamp", Pole: "substation", Constant: "constant-combinator", Arithmetic: "arithmetic-combinator", Decider: "decider-combinator"}
+_PROTOTYPE = {Wall: "stone-wall", Gate: "gate", Panel: "display-panel", Lamp: "small-lamp", Pole: "substation", Constant: "constant-combinator", Arithmetic: "arithmetic-combinator", Decider: "decider-combinator", Selector: "selector-combinator"}
 
 
 def _position(e: Entity, slot: int) -> tuple[float, float]:
@@ -319,6 +322,8 @@ def _entity_in(d: dict[str, Any]) -> Entity:
             _operand_in(ac, "first"), ac.get("operation", "*"), _operand_in(ac, "second"),
             ac["output_signal"]["name"], label=label, position=pos,
         )
+    if name == "selector-combinator":
+        return Selector(bool(cb.get("select_max", True)), int(cb.get("index_constant", 0)), label=label, position=pos)
     if name == "decider-combinator":
         dc = cb["decider_conditions"]
         conds = []

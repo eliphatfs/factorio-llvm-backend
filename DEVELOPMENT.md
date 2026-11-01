@@ -76,6 +76,15 @@ wrote. Loads in a block each get a read port and run in parallel. See
 values) while `RESET` is on. Not supported: pointer arguments, pointers that
 may point into different arrays, other element types, `memcpy`.
 
+Vector ops (`vadd` & co., see `factorio.h` and the `memory.py` docstring) are
+`clear` ops with a kind (`Op.predicate`) and source arrays: the clear drops
+the destination's words and a gate puts the op's result onto its loops the
+same tick, chained from the block's gate flag (`cfg._emit_vector`). A block
+splits before a vector op whose sources it already wrote, as before a load;
+`vshift`s by one `k` share a rename network and go out a step apart.
+`vsum` / `vfirst` read like a load from a fixed address. `vfirst` uses the
+selector combinator (`netlist.Selector`, "select input", smallest first).
+
 M4 I/O. Every stepped blueprint has an **OUTPUT** terminal (an empty constant
 combinator to wire the factory to): once halted it carries the result and
 `signal-check = 1`. A display panel shows the status: reset, running or done.

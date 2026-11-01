@@ -97,6 +97,8 @@ def _side(fn: Function, preds: dict[str, list[str]], name: str, a: Block) -> Blo
         and b.term.kind == "br"
         and b.term.targets[0] not in (a.name, name)
         and len(b.ops) <= MAX_SIDE_OPS
+        # Several vector ops are several blocks anyway: a branch skips them all.
+        and sum(op.opcode == "clear" and op.predicate is not None for op in b.ops) <= 1
     )
     return b if ok else None
 

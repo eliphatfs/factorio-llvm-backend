@@ -119,11 +119,16 @@ class Store:
     wave: int = 0  # steps after the block's first stores (see split_after_stores)
     enable: Lowered | None = None  # E to send when guarded: array id (or -id) if the guard holds, else 0
     delay: int | None = None  # pipelined loop: ticks after its iteration starts, not a step
+    vector: tuple | None = None  # a clear that writes a vector op's result: (kind, source arrays, constant)
 
 
     def __str__(self) -> str:
         if self.delay is not None:
             return f"iteration +{self.delay}  " + Store.__str__(Store(**{**self.__dict__, "delay": None})).split("  ", 1)[1]
+        if self.vector is not None:
+            kind, srcs, k = self.vector
+            args = ", ".join([*(a.name for a in srcs), *([] if k is None else [str(k)])])
+            return f"@{self.step}  {self.array} <- v{kind}({args})  (whole array, write port {self.port})"
         if self.clear:
             return f"@{self.step}  clear {self.array}  (write port {self.port})"
         a, v = self.sources

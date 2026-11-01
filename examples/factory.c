@@ -26,12 +26,13 @@
    python -m factorio_llvm examples/factory.c -f game --args 1000000000 --no-sim \
        --io walk=signal-W --io hold=signal-H */
 #ifndef TW
-#define TW 32           /* tiles per row (a power of two) */
+#define TW 32           /* tiles per row */
 #define TH 24           /* tile rows; the last one is the toolbar */
 #endif
 #define SCREEN_W (TW * 8)
 #define SCREEN_H (TH * 8)
 #include <factorio.h>
+#include <string.h>
 
 #define NT (TW * TH)
 #ifndef SY
@@ -219,14 +220,22 @@ static const int sprites[1152] = {
 #define OFF NT    /* a tile index past the field: always EMPTY */
 int kind[NT + 1];   /* EMPTY / CHEST / BELT / INSERTER (or a toolbar kind) */
 int dir[NT];        /* 0 east, 1 south, 2 west, 3 north */
-int item[NT + 1];   /* a plate on this belt, or in this inserter's hand */
-int moved[NT + 1];  /* frame in which a plate arrived here (moves once a frame) */
+int item[NT + 1];   /* a plate in this inserter's hand */
 int slot[NT];       /* index of this tile in its list */
 int ahead[NT];      /* the tile this belt or inserter faces, or OFF */
 int behind[NT];     /* the tile behind it, or OFF */
 int lists[2 * MAXE]; /* belts, then inserters */
 int count[2];        /* how many belts, inserters */
 int dirty[2 * NT]; /* tiles to redraw this frame (setup queues all of them) */
+/* Belts run as vector ops on whole arrays (factorio.h), so they cost the same
+   however many there are: one NT-word array per thing, one word per tile. */
+int plate[NT];       /* a plate on this belt */
+int isbelt[NT];      /* 1 on belts */
+int bE[NT], bS[NT], bW[NT], bN[NT]; /* 1 on belts facing that way with a tile ahead */
+int movable[NT];     /* which of those (dir + 1), or 0 */
+int nbelt[4];        /* how many belts of each, to skip directions with none */
+int moved[NT];       /* a plate arrived here this frame (moves once a frame) */
+int vfree[NT], vtarget[NT], vtake[NT], vtake2[NT], vgo[NT], varrive[NT]; /* scratch */
 int ndirty, frame;
 extern volatile int walk[1], hold[1]; /* the two input terminals */
 /* The compiler latches inputs, so a block that reads them sees one
@@ -261,7 +270,7 @@ static inline void unlist(int t) {
 /* Put `k` (BELT, INSERTER or EMPTY) facing `d` on tile t. */
 /* The tile next to t in direction d, or OFF past the edge of the field. */
 static inline int neighbour(int t, int d) {
-    int x = (t & (TW - 1)) + step_x(d), y = t / TW + step_y(d);
+    int ty = t / TW, x = t - ty * TW + step_x(d), y = ty + step_y(d);
     return x >= 0 && x < TW && y >= 0 && y < TH - 1 ? y * TW + x : OFF;
 }
 
@@ -279,19 +288,49 @@ __attribute__((always_inline)) static inline void build(int t, int k, int d) {
         }
         kind[t] = k;
         item[t] = 0;
+        plate[t] = 0;
     }
     dir[t] = d;
-    ahead[t] = neighbour(t, d);
+    int a = neighbour(t, d);
+    ahead[t] = a;
     behind[t] = neighbour(t, (d + 2) & 3);
+    int was = movable[t], now = k == BELT && a != OFF ? d + 1 : 0;
+    if (was) nbelt[was - 1]--;
+    if (now) nbelt[now - 1]++;
+    movable[t] = now;
+    isbelt[t] = k == BELT;
+    bE[t] = now == 1;
+    bS[t] = now == 2;
+    bW[t] = now == 3;
+    bN[t] = now == 4;
     mark(t);
 }
+
+/* Move every plate on a belt facing `b` (offset `o` to the next tile) one
+   tile forward if that tile is a free belt and the plate has not moved yet
+   this frame. All at once: a plate whose next tile empties this frame waits
+   a frame. Each line is one vector op; ops on one line run together. */
+#define BELT_STEP(b, o)                                                                 \
+    do {                                                                                \
+        vgt(vfree, isbelt, plate); vsel(vtake, b, plate);    /* free belts; plates here */ \
+        vshift(vtarget, vfree, o); vgt(vtake2, vtake, moved); /* next tile free; not moved */ \
+        vsel(vgo, vtake2, vtarget);                                                     \
+        vshift(varrive, vgo, -(o)); vsub(plate, plate, vgo);                              \
+        vadd(plate, plate, varrive); vadd(moved, moved, varrive);                        \
+        /* redraw both ends of each move, lowest tile first */                          \
+        for (int t; (t = vfirst(varrive)) >= 0;) {                                      \
+            varrive[t] = 0;                                                             \
+            mark(t);                                                                    \
+            mark(t - (o));                                                              \
+        }                                                                               \
+    } while (0)
 
 /* Redraw one pixel row of a queued 8x8 tile: ground or a building, a plate, the engineer, and the
    toolbar frame. Directional sprites are drawn facing east and rotated. */
 static inline void draw_row(int r, int ex, int ey, int epose, int tool) {
     int t = dirty[r >> 3], y = r & 7;
-    int tx = t & (TW - 1), ty = t / TW;
-    int k = kind[t], d = dir[t], it = item[t];
+    int ty = t / TW, tx = t - ty * TW;
+    int k = kind[t], d = dir[t], it = item[t] | plate[t];
     /* Table lookups rather than if/else chains, so this is one block and
        the loop over all rows of all redrawn tiles pipelines. */
     int b0 = base_sprite[k] * 64 + rot0[d], o0 = over_sprite[k * 2 + it] * 64 + rot0[d];
@@ -373,16 +412,16 @@ int game(int frames) {
                 build(t, k, d);
         }
 
-        /* 2. inserters: grab from behind, drop in front */
+        /* 2. inserters (a list: there are few): grab from behind, drop in front */
         for (int i = 0; i < count[1]; i++) {
             int t = lists[MAXE + i];
             if (!item[t]) {
                 /* grab every third frame: plates 3 tiles apart read clearly as
                    moving forward (2 apart, a step forward looks like a step back) */
                 int s = behind[t], k = kind[s];
-                if (frame % 3 == 0 && (k == CHEST || (k == BELT && item[s]))) {
+                if (frame % 3 == 0 && (k == CHEST || (k == BELT && plate[s]))) {
                     if (k == BELT) {
-                        item[s] = 0;
+                        plate[s] = 0;
                         mark(s);
                     }
                     item[t] = 1;
@@ -390,12 +429,12 @@ int game(int frames) {
                 }
             } else {
                 int f = ahead[t], k = kind[f];
-                if (k == CHEST || (k == BELT && !item[f])) {
+                if (k == CHEST || (k == BELT && !plate[f])) {
                     if (k == CHEST) {
                         delivered++;
                     } else {
-                        item[f] = 1;
-                        moved[f] = frame;
+                        plate[f] = 1;
+                        moved[f] = 1;
                         mark(f);
                     }
                     item[t] = 0;
@@ -404,20 +443,12 @@ int game(int frames) {
             }
         }
 
-        /* 3. belts: each plate moves one tile forward */
-        for (int i = 0; i < count[0]; i++) {
-            int t = lists[i];
-            if (item[t] && moved[t] != frame) {
-                int f = ahead[t], k = kind[f];
-                if (k == BELT && !item[f]) { /* belts only feed belts; chests need an inserter */
-                    item[t] = 0;
-                    mark(t);
-                    item[f] = 1;
-                    moved[f] = frame;
-                    mark(f);
-                }
-            }
-        }
+        /* 3. belts: each plate moves one tile forward (vector ops, see BELT_STEP) */
+        if (nbelt[0]) BELT_STEP(bE, 1);
+        if (nbelt[1]) BELT_STEP(bS, TW);
+        if (nbelt[2]) BELT_STEP(bW, -1);
+        if (nbelt[3]) BELT_STEP(bN, -TW);
+        memset(moved, 0, sizeof moved);
 
         /* 4. redraw what changed */
         for (int r = 0; r < ndirty * 8; r++) draw_row(r, ex, ey, face * 2 + step, tool);
