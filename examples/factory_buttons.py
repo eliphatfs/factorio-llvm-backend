@@ -14,7 +14,7 @@ WALK = "signal-W"  # --io walk=signal-W
 HOLD = "signal-H"  # --io hold=signal-H
 
 PAGES = [
-    ("walk: stop", WALK, 0, "signal-deny"),
+    ("walk: stop", WALK, 0, "signal-no-entry"),
     ("walk: up", WALK, 1, "up-arrow"),
     ("walk: right", WALK, 2, "right-arrow"),
     ("walk: down", WALK, 3, "down-arrow"),
