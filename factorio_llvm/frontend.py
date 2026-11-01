@@ -160,7 +160,7 @@ _VECTOR_CALL = re.compile(r"@__fv_(\w+)\(")
 VECTOR_KINDS = {
     "add": (2, False), "sub": (2, False), "sel": (2, False),
     "lt": (2, False), "le": (2, False), "gt": (2, False), "ge": (2, False), "eq": (2, False), "ne": (2, False),
-    "addk": (1, True), "mulk": (1, True), "andk": (1, True), "shlk": (1, True), "shrk": (1, True),
+    "shift": (1, True), "addk": (1, True), "mulk": (1, True), "andk": (1, True), "shlk": (1, True), "shrk": (1, True),
     "ltk": (1, True), "lek": (1, True), "gtk": (1, True), "gek": (1, True), "eqk": (1, True), "nek": (1, True),
 }
 
@@ -516,6 +516,8 @@ def split_after_stores(fn: Function) -> Function:
             """One step after every earlier store of this piece it may overwrite."""
             if op.opcode == "clear":
                 clash = mine(op)
+                if op.predicate == "shift":  # vshifts by one k share a network: one a step
+                    clash += [(None, None, o.wave) for o in piece.ops if o is not op and o.predicate == "shift" and o.args[-1] == op.args[-1]]
             else:
                 addr = _affine(op.args[1], defs)
                 clash = [w for w in mine(op) if w[1] is None or w[1][0] != addr[0] or w[1][1] == addr[1]]

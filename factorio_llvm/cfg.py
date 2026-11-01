@@ -412,7 +412,11 @@ class _CfgLowerer(_Lowerer):
         n1.attach(hold.inp)
         kind, srcs, k = st.vector
         arr = next(a for a in self.fn.arrays if a.name == st.array)
-        self.mem.vector(arr, kind, srcs, k, n2, GATE, str(st))
+        early = None
+        if kind == "shift":  # its sources are sampled at S = step (see Memory._vector)
+            early = self.b.nl.net(RED, f"{st.array} vector feed {st.step}")
+            self.b.place(Decider([self._step_is(st.step - 1)], [Out(GATE, copy=False, constant=1)], label=f"{st}: feed"), (RED,), early)
+        self.mem.vector(arr, kind, srcs, k, n2, GATE, str(st), early)
 
     def _emit_load(self, ld: Load, bs: BlockSchedule) -> None:
         assert self.mem is not None

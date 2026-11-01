@@ -99,7 +99,7 @@ STORE_LANDS = 3  # a store sampled at tick k is on the chunk loop from tick k + 
 
 
 # ticks from the sources' loops to the gate's input
-_VECTOR_DEPTH = {"add": 1, "sub": 1, "addk": 1, "mulk": 1, "andk": 1, "shlk": 1, "shrk": 1, "sel": 2}
+_VECTOR_DEPTH = {"add": 1, "sub": 1, "addk": 1, "mulk": 1, "andk": 1, "shlk": 1, "shrk": 1, "sel": 2, "shift": 2}
 
 
 def vector_depth(kind: str) -> int:
@@ -182,10 +182,31 @@ class Memory:
         self.banks = {id(a): _Bank(a, i + 1) for i, a in enumerate(arrays)}
         self.vectors: list[tuple] = []  # (dst, kind, sources, k, flag net, flag signal, label)
         self.sums: dict[int, Net] = {}  # array id -> the net with its vsum
+        self.shifters: dict[tuple[int, int], tuple[list[Net], list[Net]]] = {}  # (k, size) -> in, out nets per chunk
 
-    def vector(self, dst: Array, kind: str, srcs: list[Array], k: int | None, flag: Net, flag_signal: str, label: str) -> None:
-        """A vector op's per-chunk networks, placed by build() once the loops exist."""
-        self.vectors.append((dst, kind, srcs, k, flag, flag_signal, label))
+    def vector(self, dst: Array, kind: str, srcs: list[Array], k: int | None, flag: Net, flag_signal: str, label: str, early: Net | None = None) -> None:
+        """A vector op's per-chunk networks, placed by build() once the loops exist.
+        ``early`` (vshift) carries the flag 2 ticks before ``flag``."""
+        self.vectors.append((dst, kind, srcs, k, flag, flag_signal, label, early))
+
+    def _shifter(self, k: int, size: int, group: str) -> tuple[list[Net], list[Net]]:
+        """The rename network of every vshift by ``k`` of ``size``-word arrays:
+        word i + k of the input nets -> word i of the output nets, one
+        arithmetic combinator per word. The ops take turns (one a step)."""
+        key = (k, size)
+        if key not in self.shifters:
+            chunks = range(0, size, CHUNK)
+            ins = [self.b.nl.net(GREEN, f"vshift {k} of {size} in [{b}..]") for b in chunks]
+            outs = [self.b.nl.net(GREEN, f"vshift {k} of {size} out [{b}..]") for b in chunks]
+            for i in range(size):
+                j = i + k
+                if not 0 <= j < size:
+                    continue
+                e = Arithmetic(Sig(_CHUNK_SIGNALS[j % CHUNK], frozenset({GREEN})), "+", 0, _CHUNK_SIGNALS[i % CHUNK], label=f"vshift {k}: [{i}] <- [{j}]")
+                self.b.place(e, (), outs[i // CHUNK], f"vshift {k}")
+                ins[j // CHUNK].attach(e.inp)
+            self.shifters[key] = (ins, outs)
+        return self.shifters[key]
 
     def sum_result(self, a: Array, label: str) -> Wire:
         """``vsum(a)``: like a load from a fixed address (see load_result)."""
@@ -387,9 +408,23 @@ class Memory:
         for v in self.vectors:
             self._vector(*v)
 
-    def _vector(self, dst: Array, kind: str, srcs: list[Array], k: int | None, flag: Net, flag_signal: str, label: str) -> None:
+    def _vector(self, dst: Array, kind: str, srcs: list[Array], k: int | None, flag: Net, flag_signal: str, label: str, early: Net | None) -> None:
         group = f"array {dst.name}"
         loops = [self.bank(a).loops for a in srcs]
+        if kind == "shift":
+            assert early is not None and k is not None
+            ins, outs = self._shifter(k, dst.size, group)
+            for c in range(len(ins)):
+                # source chunk c -> the shared input, while this op samples
+                feed = Arithmetic(Sig(EACH, frozenset({GREEN})), "*", Sig(flag_signal, frozenset({RED})), EACH, label=f"{label} [{c * CHUNK}..] feed")
+                self.b.place(feed, (), ins[c], group)
+                loops[0][c].attach(feed.inp)
+                early.attach(feed.inp)
+                gate = Arithmetic(Sig(EACH, frozenset({GREEN})), "*", Sig(flag_signal, frozenset({RED})), EACH, label=f"{label} [{c * CHUNK}..] gate")
+                self.b.place(gate, (), self.bank(dst).loops[c], group)
+                outs[c].attach(gate.inp)
+                flag.attach(gate.inp)
+            return
         for c, base in enumerate(range(0, dst.size, CHUNK)):
             n = min(CHUNK, dst.size - base)
             sigs = _CHUNK_SIGNALS[:n]

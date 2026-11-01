@@ -18,6 +18,7 @@ INCLUDE = Path(__file__).parent.parent / "factorio_llvm" / "include"
 
 SRC = r"""
 #include <factorio.h>
+int big[800], big2[800];
 #define N 9
 int a[N], b[N], d[N];
 static void fill(int x, int y) {
@@ -45,7 +46,18 @@ int t_chain(int x, int y) {
     }
     return s * 1000 + digest();
 }
-int big[800], big2[800];
+int t_shift(int x, int y) {
+    fill(x, y);
+    vshift(d, a, 1); int h = digest();
+    vshift(d, b, -3); h = h * 7 + digest();
+    vshift(a, a, 1); vshift(b, a, 1); /* two by 1 in one block: one a step */
+    vadd(d, a, b); return h * 7 + digest();
+}
+int t_shift_chunks(int x, int y) {
+    for (int i = 0; i < 800; i += 7) big[i] = i * x + y;
+    vshift(big2, big, 395); vshift(big, big2, -400);
+    return big2[0] * 10000 + big2[3] * 100 + big[399] + big[402] * 3 + big[799] * 5;
+}
 int t_chunks(int x, int y) {
     for (int i = 0; i < 800; i += 13) big[i] = i * x - y;
     vaddk(big2, big, 3);

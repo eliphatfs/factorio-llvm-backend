@@ -70,6 +70,8 @@ static inline int ticks(void) { return factorio_clock[0]; }
  *   vaddk(d, a, k)  d[i] = a[i] + k           vmulk(d, a, k) d[i] = a[i] * k
  *   vandk(d, a, k)  d[i] = a[i] & k           vshlk / vshrk  d[i] = a[i] << k, >> k
  *   vsel(d, m, a)   d[i] = m[i] ? a[i] : 0
+ *   vshift(d, a, k) d[i] = a[i + k], 0 past either end (costs one combinator
+ *                   per word for each k used, shared by all vshifts by k)
  *   vlt / vle / vgt / vge / veq / vne(d, a, b)  d[i] = a[i] < b[i] (0 or 1), ...
  *   vltk ... vnek(d, a, k)                     d[i] = a[i] < k, ...
  *   vsum(a)         the sum of all words
@@ -81,7 +83,7 @@ static inline int ticks(void) { return factorio_clock[0]; }
 #define FV_DECL2_(k) void __fv_##k(int *, const int *, const int *, int);
 #define FV_DECLK_(k) void __fv_##k(int *, const int *, int, int);
 FV_DECL2_(add) FV_DECL2_(sub) FV_DECL2_(sel) FV_DECL2_(lt) FV_DECL2_(le) FV_DECL2_(gt) FV_DECL2_(ge) FV_DECL2_(eq) FV_DECL2_(ne)
-FV_DECLK_(addk) FV_DECLK_(mulk) FV_DECLK_(andk) FV_DECLK_(shlk) FV_DECLK_(shrk)
+FV_DECLK_(shift) FV_DECLK_(addk) FV_DECLK_(mulk) FV_DECLK_(andk) FV_DECLK_(shlk) FV_DECLK_(shrk)
 FV_DECLK_(ltk) FV_DECLK_(lek) FV_DECLK_(gtk) FV_DECLK_(gek) FV_DECLK_(eqk) FV_DECLK_(nek)
 int __fv_sum(const int *, int);
 #else /* native builds (tests): plain loops */
@@ -91,6 +93,11 @@ FV_DEF2_(add, (int)((unsigned)a[i] + (unsigned)b[i])) FV_DEF2_(sub, (int)((unsig
 FV_DEF2_(sel, a[i] ? b[i] : 0)
 FV_DEF2_(lt, a[i] < b[i]) FV_DEF2_(le, a[i] <= b[i]) FV_DEF2_(gt, a[i] > b[i])
 FV_DEF2_(ge, a[i] >= b[i]) FV_DEF2_(eq, a[i] == b[i]) FV_DEF2_(ne, a[i] != b[i])
+static inline void __fv_shift(int *d, const int *a, int k, int n) {
+    int t[n]; /* d may be a */
+    for (int i = 0; i < n; i++) t[i] = i + k >= 0 && i + k < n ? a[i + k] : 0;
+    for (int i = 0; i < n; i++) d[i] = t[i];
+}
 FV_DEFK_(addk, (int)((unsigned)a[i] + (unsigned)c)) FV_DEFK_(mulk, (int)((unsigned)a[i] * (unsigned)c))
 FV_DEFK_(andk, a[i] & c) FV_DEFK_(shlk, (int)((unsigned)a[i] << (c & 31))) FV_DEFK_(shrk, a[i] >> (c & 31))
 FV_DEFK_(ltk, a[i] < c) FV_DEFK_(lek, a[i] <= c) FV_DEFK_(gtk, a[i] > c)
@@ -106,6 +113,7 @@ static inline int __fv_sum(const int *a, int n) { unsigned s = 0; for (int i = 0
 #define vge(d, a, b) __fv_ge(d, a, b, FV_N_(d))
 #define veq(d, a, b) __fv_eq(d, a, b, FV_N_(d))
 #define vne(d, a, b) __fv_ne(d, a, b, FV_N_(d))
+#define vshift(d, a, k) __fv_shift(d, a, k, FV_N_(d))
 #define vaddk(d, a, k) __fv_addk(d, a, k, FV_N_(d))
 #define vmulk(d, a, k) __fv_mulk(d, a, k, FV_N_(d))
 #define vandk(d, a, k) __fv_andk(d, a, k, FV_N_(d))
