@@ -237,8 +237,9 @@ int game(int frames) {
     for (int x = 0; x < TW; x++) kind[(TH - 1) * TW + x] = x < 4 ? K_TOOL + x : K_OFF;
     kind[SY * TW + 1] = CHEST;
     build(SY * TW + 2, INSERTER, 0);
-    for (int x = 3; x < BELT_END; x++) build(SY * TW + x, BELT, 0);
-    kind[SY * TW + BELT_END] = CHEST;  /* a second chest at the end swallows plates */
+    for (int x = 3; x < BELT_END - 1; x++) build(SY * TW + x, BELT, 0);
+    build(SY * TW + BELT_END - 1, INSERTER, 0); /* an inserter unloads the belt */
+    kind[SY * TW + BELT_END] = CHEST;            /* into a chest that swallows plates */
     for (int t = 0; t < NT; t++) mark(t);
 
     for (; frame <= frames; frame++) {
@@ -302,16 +303,12 @@ int game(int frames) {
             int t = lists[i];
             if (item[t] && moved[t] != frame) {
                 int f = ahead[t], k = kind[f];
-                if (k == CHEST || (k == BELT && !item[f])) {
+                if (k == BELT && !item[f]) { /* belts only feed belts; chests need an inserter */
                     item[t] = 0;
                     mark(t);
-                    if (k == CHEST) {
-                        delivered++;
-                    } else {
-                        item[f] = 1;
-                        moved[f] = frame;
-                        mark(f);
-                    }
+                    item[f] = 1;
+                    moved[f] = frame;
+                    mark(f);
                 }
             }
         }
