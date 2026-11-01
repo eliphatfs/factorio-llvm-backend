@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from .frontend import _array_of, Array, Block, Function, Op, Operand, Unsupported, Value
 from .fuse import Bool, pieces
 from .lower import GATE, PRIVATE_CONSTANT, STABLE, Lowered, Wire, _Builder, _colors, _depth, _early, _Lowerer, _operand, _vary
-from .signals import EACH, rich_text
+from .signals import EACH, EVERYTHING, rich_text
 from .netlist import GREEN, RED, Arithmetic, Cond, Connector, Constant, Decider, Message, Net, Netlist, Out, Panel, Sig
 from .layout import FIXED
 from .memory import ADDRESS, STORE_LANDS, Memory, Ptr
@@ -613,9 +613,9 @@ class _CfgLowerer(_Lowerer):
             self.b.place(Arithmetic(Sig(EACH, frozenset({RED})), "+", 0, EACH, label=f"{live.name} -> snapshot"), (), fresh)
             fresh_copy = fresh.members[-1].entity
             live.attach(fresh_copy.inp)
-            holder = self.b.place(Decider(hold, [Out(EACH, networks=GREEN)], label=f"{live.name} snapshot: hold"), (RED,), snap)
+            holder = self.b.place(Decider(hold, [Out(EVERYTHING, networks=GREEN)], label=f"{live.name} snapshot: hold"), (RED,), snap)
             snap.attach(holder.inp)
-            sampler = self.b.place(Decider(hold, [], else_outputs=[Out(EACH, networks=GREEN)], label=f"{live.name} snapshot: follow"), (RED,), snap)
+            sampler = self.b.place(Decider(hold, [], else_outputs=[Out(EVERYTHING, networks=GREEN)], label=f"{live.name} snapshot: follow"), (RED,), snap)
             fresh.attach(sampler.inp)
             for copy in copies:
                 live.members.remove(copy.inp)
