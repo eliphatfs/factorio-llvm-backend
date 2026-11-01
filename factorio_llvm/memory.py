@@ -176,7 +176,7 @@ class Memory:
         self.b.place(rename, (), GREEN)
         result.attach(rename.inp)
         return Wire(
-            out, _depth_of(address) + LOAD_LATENCY, early=_early(address) + LOAD_LATENCY, vary=_vary(address) + LOAD_LATENCY,
+            out, max(0, _depth_of(address)) + LOAD_LATENCY, early=_early(address) + LOAD_LATENCY, vary=_vary(address) + LOAD_LATENCY,
             reads=_merge_reads(_reads(address, lo=LOAD_LATENCY), ((a.name, READ_TO_RESULT, READ_TO_RESULT),)),
         )
 

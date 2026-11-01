@@ -110,11 +110,18 @@ class _CfgLowerer(_Lowerer):
         self.gates: dict[tuple[int, int], str] = {}  # (block net, step) -> its flag signal
         self.phi_block = {id(p.result): b.name for b in fn.blocks for p in b.phis}
         self.chains: dict[int, list[str]] = {}  # pipelined block net -> its iteration flags
+        # Cross-block overlap: a register no predecessor of the block writes was
+        # latched before the predecessor started, so it has been on the bus at
+        # least ``slack`` ticks when the block starts (see _plan_overlap).
+        self.fresh: dict[str, set[int]] = {}  # block -> ids of registers its predecessors latch
+        self.slack: dict[str, int] = {}
+        self.depths: dict[str, int] = {}  # block -> base-to-base ticks, once scheduled
 
     # values: block-local combinators first, then registers and arguments
     def get_raw(self, a: Operand):
         if not isinstance(a, int) and id(a) in self.copies and self.copies[id(a)][1] != self.cur:
-            w = Wire(self.copies[id(a)][0].signal, 0, RED, early=STABLE, vary=-STABLE)
+            r = self.copies[id(a)][0]
+            w = Wire(r.signal, self._settled(r), RED, early=STABLE, vary=-STABLE)
             return Ptr(a.array, w) if a.array is not None else w
         if isinstance(a, int):
             return a
@@ -124,7 +131,9 @@ class _CfgLowerer(_Lowerer):
             return self.local[id(a)]
         if id(a) in self.regs:
             # Only the block's own phis change while it runs (see _pipeline).
-            w = Wire(self.regs[id(a)].signal, 0, RED, **_changing(self.phi_block.get(id(a)) == self.cur))
+            r = self.regs[id(a)]
+            mine = self.phi_block.get(id(a)) == self.cur
+            w = Wire(r.signal, 0 if mine else self._settled(r), RED, **_changing(mine))
             return Ptr(a.array, w) if a.array is not None else w
         return self.env[id(a)]
 
@@ -197,6 +206,34 @@ class _CfgLowerer(_Lowerer):
             self.regs[id(v)] = r
             self.names[v.name] = r.signal
         return self.regs[id(v)]
+
+    def _settled(self, r: Register) -> int:
+        """Depth of a register read in the current block: 0, or minus the
+        ticks it has already been stable when the block starts."""
+        return 0 if id(r) in self.fresh.get(self.cur, ()) else -self.slack.get(self.cur, 0)
+
+    def _plan_overlap(self) -> None:
+        """Which registers each block's predecessors latch (see ``fresh``)."""
+        writes: dict[str, set[int]] = {}
+        preds: dict[str, list[str]] = {b.name: [] for b in self.fn.blocks}
+        for b in self.fn.blocks:
+            w = writes.setdefault(b.name, set())
+            w |= {id(self.copies[id(p.result)][0]) for p in b.phis if id(p.result) in self.copies}
+            w |= {id(self.regs[id(op.result)]) for op in b.ops if id(op.result) in self.regs}
+            t = b.term
+            assert t is not None
+            for succ in {*t.targets, *(d for _, d in t.cases)}:
+                if succ in preds:
+                    preds[succ].append(b.name)
+                    w |= {id(self.regs[id(p.result)]) for p in self._block(succ).phis}
+        self.preds = preds
+        for name, ps in preds.items():
+            self.fresh[name] = set().union(*(writes[p] for p in ps)) if ps else set()
+
+    def _block_slack(self, name: str) -> int:
+        # A predecessor scheduled already has its length; any other is at least 3.
+        ps = self.preds[name]
+        return min((self.depths.get(p, 3) for p in ps), default=0)
 
     def _plan_registers(self) -> None:
         for b in self.fn.blocks:
@@ -348,6 +385,7 @@ class _CfgLowerer(_Lowerer):
 
     def run(self) -> SteppedCompiled:
         self._plan_registers()
+        self._plan_overlap()
 
         self.b.group = "control"
         # Counter: S starts at 1 and rises by 1 a tick; jumps add to it.
@@ -385,6 +423,7 @@ class _CfgLowerer(_Lowerer):
         for b in self.fn.blocks:
             nets[b.name] = self.b.begin_block(b.name)
             self.cur = b.name
+            self.slack[b.name] = self._block_slack(b.name)
             self.balance = self._loop_with_stores(b)
             self.local, self.loads, self.stores = {}, [], []
             for op in b.ops:
@@ -398,6 +437,7 @@ class _CfgLowerer(_Lowerer):
                 st.step = bs.gate - (last - st.wave)
             self._pipeline(b, bs)
             sched.append(bs)
+            self.depths[b.name] = bs.depth + 2
             k = bs.jump + 1 + bs.drain
         schedule = Schedule(sched, self.registers, result, halt=k)
 
