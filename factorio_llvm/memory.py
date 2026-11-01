@@ -168,7 +168,7 @@ class Memory:
             bank.ports.append(_Port(self.b.nl.net(color, f"{a.name} port {n} address"), self.b.nl.net(color, f"{a.name} port {n} data")))
         return bank.ports[j]
 
-    def load_result(self, a: Array, j: int, address: Lowered, label: str) -> Wire:
+    def load_result(self, a: Array, j: int, address: Lowered, label: str, start: int = 0) -> Wire:
         """The block-local copy of port ``j``'s data (placed in the current block)."""
         out = self.b.local_signal()
         result = self.port(a, j).result
@@ -176,7 +176,7 @@ class Memory:
         self.b.place(rename, (), GREEN)
         result.attach(rename.inp)
         return Wire(
-            out, max(0, _depth_of(address)) + LOAD_LATENCY, early=_early(address) + LOAD_LATENCY, vary=_vary(address) + LOAD_LATENCY,
+            out, max(start, _depth_of(address)) + LOAD_LATENCY, early=_early(address) + LOAD_LATENCY, vary=_vary(address) + LOAD_LATENCY,
             reads=_merge_reads(_reads(address, lo=LOAD_LATENCY), ((a.name, READ_TO_RESULT, READ_TO_RESULT),)),
         )
 

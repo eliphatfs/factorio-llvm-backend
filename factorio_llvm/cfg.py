@@ -156,8 +156,9 @@ class _CfgLowerer(_Lowerer):
                 self.direct_reads.append((copy, ptr.array, ptr.index, self.cur))
                 return Wire(out, 1, early=STABLE, vary=-STABLE)
             port = sum(1 for x in self.loads if x.array == ptr.array.name)
-            self.loads.append(Load(ptr.array.name, port, ptr.index, _name(op.args[0])))
-            return self.mem.load_result(ptr.array, port, ptr.index, op.text)
+            lead = self._lead(ptr.array, ptr.index)
+            self.loads.append(Load(ptr.array.name, port, ptr.index, _name(op.args[0]), lead))
+            return self.mem.load_result(ptr.array, port, ptr.index, op.text, start=-lead)
         if op.opcode == "store":
             assert self.mem is not None
             value, ptr = (self.get(x) for x in op.args)
@@ -229,6 +230,18 @@ class _CfgLowerer(_Lowerer):
         self.preds = preds
         for name, ps in preds.items():
             self.fresh[name] = set().union(*(writes[p] for p in ps)) if ps else set()
+
+    def _lead(self, arr, address: Lowered) -> int:
+        """How many steps before the block a load may start: its address has
+        settled by then and no predecessor touches the array (its ports, its
+        words) in those steps, which are each predecessor's last."""
+        ps = self.preds[self.cur]
+        if not ps or not isinstance(address, Wire) or address.depth >= 0:
+            return 0
+        for p in ps:
+            if any(op.opcode in ("load", "store", "clear") and _array_of(op) is arr for op in self._block(p).ops):
+                return 0
+        return min(-address.depth, self.slack[self.cur])
 
     def _block_slack(self, name: str) -> int:
         # A predecessor scheduled already has its length; any other is at least 3.
@@ -367,6 +380,10 @@ class _CfgLowerer(_Lowerer):
         assert self.mem is not None
         s = Sig(self.step, frozenset({RED}))
         window = [Cond(s, ">=", bs.base), Cond(s, "<=", bs.jump + bs.drain)]
+        if ld.lead:
+            for p in self.preds[bs.name]:
+                end = (ps := self._schedule.block(p)).jump + ps.drain
+                window += [Cond(s, ">=", end - ld.lead + 1, join="or"), Cond(s, "<=", end)]
         arr = next(a for a in self.fn.arrays if a.name == ld.array)
         # Addresses travel as address + 1 (see memory.py).
         self._pass(window, ld.address, ADDRESS, self.mem.port(arr, ld.port).address, f"{bs.name}: {ld}", add=1)
@@ -439,7 +456,7 @@ class _CfgLowerer(_Lowerer):
             sched.append(bs)
             self.depths[b.name] = bs.depth + 2
             k = bs.jump + 1 + bs.drain
-        schedule = Schedule(sched, self.registers, result, halt=k)
+        schedule = self._schedule = Schedule(sched, self.registers, result, halt=k)
 
         # Pass 2: the schedule's writes and jumps.
         for b, bs in zip(self.fn.blocks, sched):
