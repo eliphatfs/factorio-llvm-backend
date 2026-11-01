@@ -154,6 +154,15 @@ _CONST_GEP = re.compile(r"ptr getelementptr (?:inbounds |nuw |nusw )*\(\[\d+ x i
 _CONST_GEP_I8 = re.compile(r"ptr getelementptr (?:inbounds |nuw |nusw )*\(i8, ptr @([\w.$-]+), i64 (\d+)\)")
 _MEMSET = re.compile(r"@llvm\.memset\.")
 _SKIPPED_CALLS = re.compile(r"@llvm\.(lifetime|assume|dbg)\.")
+# Whole-array vector primitives from factorio.h (see memory.py, "Vector ops").
+_VECTOR_CALL = re.compile(r"@__fv_(\w+)\(")
+# kind -> (source arrays, constant operand)
+VECTOR_KINDS = {
+    "add": (2, False), "sub": (2, False), "sel": (2, False),
+    "lt": (2, False), "le": (2, False), "gt": (2, False), "ge": (2, False), "eq": (2, False), "ne": (2, False),
+    "addk": (1, True), "mulk": (1, True), "andk": (1, True), "shlk": (1, True), "shrk": (1, True),
+    "ltk": (1, True), "lek": (1, True), "gtk": (1, True), "gek": (1, True), "eqk": (1, True), "nek": (1, True),
+}
 
 
 def _global_array(text: str) -> Array | None:
@@ -325,6 +334,33 @@ def read_function(ir_text: str, name: str | None = None) -> Function:
                 _check_whole_array(dst, size, text)
                 block.ops.append(Op("clear", [dst], Value(f"clear{next(counter)}", 0), text=text))
                 continue
+            if opc == "call" and (vm := _VECTOR_CALL.search(text)):
+                kind = vm.group(1)
+                vargs0 = [operand(r, text) for r in refs[:-1]]
+                varrays = [a for a in vargs0 if isinstance(a, Array)]
+                if kind == "sum":
+                    if len(vargs0) != 2 or not isinstance(vargs0[0], Array):
+                        raise Unsupported(f"vsum needs a whole array: {text}")
+                    if vargs0[0].external:
+                        raise Unsupported(f"vector ops on I/O arrays are not supported: {text}")
+                    block.ops.append(Op("vsum", [vargs0[0]], values[_key(ins)], text=text))
+                    continue
+                if kind not in VECTOR_KINDS:
+                    raise Unsupported(f"unknown vector op __fv_{kind}: {text}")
+                nsrc, konst = VECTOR_KINDS[kind]
+                want = 1 + nsrc + (1 if konst else 0) + 1  # dst, sources, constant, size
+                if len(vargs0) != want or len(varrays) < 1 + nsrc or not all(isinstance(a, Array) for a in vargs0[: 1 + nsrc]):
+                    raise Unsupported(f"vector op arguments must be whole arrays: {text}")
+                if konst and not isinstance(vargs0[1 + nsrc], int):
+                    raise Unsupported(f"vector op constant must be a compile-time constant: {text}")
+                dst, srcs = vargs0[0], vargs0[1 : 1 + nsrc]
+                if any(a.size != dst.size for a in srcs):
+                    raise Unsupported(f"vector op arrays must have the same size: {text}")
+                if dst.readonly or any(a.external for a in (dst, *srcs)):
+                    raise Unsupported(f"vector op on a constant or I/O array: {text}")
+                vargs = [dst, *srcs] + ([wrap(vargs0[1 + nsrc])] if konst else [])
+                block.ops.append(Op("clear", vargs, Value(f"vec{next(counter)}", 0), predicate=kind, text=text))
+                continue
             if opc == "store":
                 block.ops.append(
                     Op("store", [operand(refs[0], text), operand(refs[1], text)], Value(f"store{next(counter)}", 0), text=text)
@@ -406,7 +442,7 @@ def _point_to_arrays(fn: Function) -> None:
 
 
 def _array_of(op: Op) -> Array | None:
-    ptr = op.args[0] if op.opcode in ("load", "clear") else op.args[1]
+    ptr = op.args[0] if op.opcode in ("load", "clear", "vsum") else op.args[1]
     return ptr if isinstance(ptr, Array) else getattr(ptr, "array", None)
 
 
@@ -437,6 +473,13 @@ def _affine(v: Operand, defs: dict[int, Op], depth: int = 0) -> _Affine:
     return frozenset({(id(v), 1)}), 0
 
 
+def vector_sources(op: Op) -> list[Array]:
+    """The arrays a vector op (a "clear" with a kind) reads."""
+    if op.opcode != "clear" or op.predicate is None:
+        return []
+    return [a for a in op.args[1:] if isinstance(a, Array)]
+
+
 def split_after_stores(fn: Function) -> Function:
     """Split blocks where a load must see an earlier store or clear; order the rest.
 
@@ -463,7 +506,11 @@ def split_after_stores(fn: Function) -> Function:
             return [w for w in written if arr is None or w[0] is None or w[0] is arr]
 
         def must_split(op: Op) -> bool:
-            return op.opcode == "load" and bool(mine(op))
+            if op.opcode in ("load", "vsum"):
+                return bool(mine(op))
+            # A vector op reads its source arrays (whole) like a load.
+            srcs = vector_sources(op)
+            return any(w[0] is None or w[0] is a for a in srcs for w in written)
 
         def wave(op: Op) -> int:
             """One step after every earlier store of this piece it may overwrite."""
@@ -523,7 +570,7 @@ def compile_c(source: str | Path, *, opt: str = "-O2", unroll: int = 1) -> str:
     if unroll > 1:
         flags = [f for f in CLANG_FLAGS if f != "-fno-unroll-loops"] + ["-funroll-loops", "-mllvm", f"-unroll-count={unroll}"]
     include = Path(__file__).parent / "include"  # factorio.h
-    base = [clang, opt, *flags, "-I", str(include), "-S", "-emit-llvm", "-fno-discard-value-names", "-o", "-"]
+    base = [clang, opt, *flags, "-D__FACTORIO__=1", "-I", str(include), "-S", "-emit-llvm", "-fno-discard-value-names", "-o", "-"]
     if isinstance(source, Path) or (isinstance(source, str) and source.endswith(".c") and Path(source).exists()):
         return subprocess.run([*base, str(source)], check=True, capture_output=True, text=True).stdout
     return subprocess.run([*base, "-x", "c", "-"], input=source, check=True, capture_output=True, text=True).stdout

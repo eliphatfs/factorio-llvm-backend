@@ -43,6 +43,26 @@ loads of one array uses ports 0, 1, ... A load costs 5 ticks on top of its
 address: drive, rename to ``A`` (+1), mask, reader, rename to a block-local
 signal.
 
+Vector ops (``vadd`` & co. in factorio.h). All words of a chunk are on its
+loop at once, and arrays of one size share chunk signals, so one combinator
+with an Each input works on a whole chunk of every source in the same tick.
+A vector op is a clear of its destination plus the op's result put onto
+the destination's loops the tick the clear drops the old words:
+
+- per chunk, a small network from the sources' loops to a *result* net:
+  ``each * ±1`` copies summed on one net (add, sub, addk with a constant
+  combinator), ``each OP k`` (mulk, andk, shlk, shrk; 0 stays 0), an Each
+  decider ``each < 0 -> 1`` on the difference (comparisons; ``<=``, ``>=``
+  and ``=`` are one minus the strict opposite, with a constant combinator of
+  ones), or ``each(m) != 0 -> each(a)`` (sel);
+- a *gate* ``each(result) * flag`` onto the loop, where ``flag`` is 1 for
+  one tick, chained from the block's gate flag (``cfg._emit_vector``).
+
+The result net reads the loops ``vector_depth(kind)`` ticks before the gate.
+Only the 0s of an Each input are absent, so every op keeps 0 -> 0 except
+where a constant combinator supplies the other value. ``vsum`` is an
+``each + 0`` into one signal, summed over the chunks, read like a load.
+
 I/O. An ``extern`` array is memory-mapped I/O on two red nets, each with a
 terminal constant combinator (empty, labelled INPUT / OUTPUT) for wiring the
 circuit to the factory. If the program never stores to it, it is an input:
@@ -66,6 +86,7 @@ from .frontend import Array
 from .frontend import Unsupported
 from .layout import screen_poles
 from .lower import Lowered, Wire, _Builder, _early, _reads, _vary
+from .sim import wrap
 from .netlist import GREEN, RED, Color, Arithmetic, Cond, Constant, Decider, Gate, Lamp, Net, Out, Pole, Sig, Wall
 from .signals import EACH, allocatable_signals
 
@@ -75,6 +96,19 @@ ENABLE = "signal-E"
 LOAD_LATENCY = 5  # ticks from a settled address to the loaded value
 READ_TO_RESULT = 2  # the reader samples the chunk loop this many ticks before the loaded value is out
 STORE_LANDS = 3  # a store sampled at tick k is on the chunk loop from tick k + 3
+
+
+# ticks from the sources' loops to the gate's input
+_VECTOR_DEPTH = {"add": 1, "sub": 1, "addk": 1, "mulk": 1, "andk": 1, "shlk": 1, "shrk": 1, "sel": 2}
+
+
+def vector_depth(kind: str) -> int:
+    return _VECTOR_DEPTH.get(kind, 2)  # comparisons: difference, then a decider
+
+
+_ARITH_K = {"mulk": "*", "andk": "AND", "shlk": "<<", "shrk": ">>"}
+# comparison -> (strict test on a - b, or the strict opposite whose complement it is)
+_CMP = {"lt": ("<", False), "gt": (">", False), "ne": ("!=", False), "ge": ("<", True), "le": (">", True), "eq": ("!=", True)}
 
 
 def _merge_reads(x: tuple, y: tuple) -> tuple:
@@ -146,6 +180,22 @@ class Memory:
         # store in a block, so a block's stores go out together.
         self.write_signals: list[tuple[str, str, str]] = [(ADDRESS, VALUE, ENABLE)]
         self.banks = {id(a): _Bank(a, i + 1) for i, a in enumerate(arrays)}
+        self.vectors: list[tuple] = []  # (dst, kind, sources, k, flag net, flag signal, label)
+        self.sums: dict[int, Net] = {}  # array id -> the net with its vsum
+
+    def vector(self, dst: Array, kind: str, srcs: list[Array], k: int | None, flag: Net, flag_signal: str, label: str) -> None:
+        """A vector op's per-chunk networks, placed by build() once the loops exist."""
+        self.vectors.append((dst, kind, srcs, k, flag, flag_signal, label))
+
+    def sum_result(self, a: Array, label: str) -> Wire:
+        """``vsum(a)``: like a load from a fixed address (see load_result)."""
+        if id(a) not in self.sums:
+            self.sums[id(a)] = self.b.nl.net(GREEN, f"{a.name} sum")
+        out = self.b.local_signal()
+        rename = Arithmetic(Sig(VALUE, frozenset({GREEN})), "+", 0, out, label=f"{label} (sum)")
+        self.b.place(rename, (), GREEN)
+        self.sums[id(a)].attach(rename.inp)
+        return Wire(out, LOAD_LATENCY, early=_early(0) + LOAD_LATENCY, vary=_vary(0) + LOAD_LATENCY, reads=((a.name, READ_TO_RESULT, READ_TO_RESULT),))
 
     def write_port(self, a: Array, p: int) -> tuple[str, str, str]:
         """The bus signals of write port ``p``, which ``a`` is stored through."""
@@ -321,6 +371,11 @@ class Memory:
             if bank.is_screen:
                 self._beside_screen(bank, chunks, screen_width, screen_x)
                 screen_x = next_x
+            if id(a) in self.sums:
+                for c, loop in enumerate(bank.loops):
+                    summer = Arithmetic(Sig(EACH, frozenset({GREEN})), "+", 0, VALUE, label=f"{a.name}[{c * CHUNK}..] sum")
+                    self.b.place(summer, (), self.sums[id(a)], group)
+                    loop.attach(summer.inp)
             # Readers port by port, each with its own copy of the chunk's key,
             # so a port's nets stay short and only the chunk loops reach across.
             for j, port in enumerate(bank.ports):
@@ -328,6 +383,67 @@ class Memory:
                     words = list(zip(sigs, a.init[base : base + CHUNK]))
                     key_net = self._key(a, base, words, group, GREEN if port.address.color == RED else RED)
                     self._reader(bank, base, j, port, key_net, bank.loops[c], group)
+
+        for v in self.vectors:
+            self._vector(*v)
+
+    def _vector(self, dst: Array, kind: str, srcs: list[Array], k: int | None, flag: Net, flag_signal: str, label: str) -> None:
+        group = f"array {dst.name}"
+        loops = [self.bank(a).loops for a in srcs]
+        for c, base in enumerate(range(0, dst.size, CHUNK)):
+            n = min(CHUNK, dst.size - base)
+            sigs = _CHUNK_SIGNALS[:n]
+            name = f"{label} [{base}..]"
+            result = self.b.nl.net(GREEN, f"{name} result")
+
+            def copy(loop: Net, net: Net, factor: int = 1) -> None:
+                e = Arithmetic(Sig(EACH, frozenset({GREEN})), "*", factor, EACH, label=f"{name} copy")
+                self.b.place(e, (), net, group)
+                loop.attach(e.inp)
+
+            def ones(net: Net, value: int) -> None:
+                if value:
+                    net.attach(self.b.place(Constant({s: value for s in sigs}, label=f"{name} constant"), (), None, group).out)
+
+            if kind in ("add", "sub", "addk"):
+                copy(loops[0][c], result)
+                if kind == "addk":
+                    ones(result, k)
+                else:
+                    copy(loops[1][c], result, 1 if kind == "add" else -1)
+            elif kind in _ARITH_K:
+                e = Arithmetic(Sig(EACH, frozenset({GREEN})), _ARITH_K[kind], k & 31 if kind in ("shlk", "shrk") else k, EACH, label=name)
+                self.b.place(e, (), result, group)
+                loops[0][c].attach(e.inp)
+            elif kind == "sel":
+                m = self.b.nl.net(RED, f"{name} mask")
+                v = self.b.nl.net(GREEN, f"{name} values")
+                e = Arithmetic(Sig(EACH, frozenset({GREEN})), "+", 0, EACH, label=f"{name} mask copy")
+                self.b.place(e, (), m, group)
+                loops[0][c].attach(e.inp)
+                copy(loops[1][c], v)
+                pick = Decider([Cond(Sig(EACH, frozenset({RED})), "!=", 0)], [Out(EACH, networks=GREEN)], label=name)
+                self.b.place(pick, (), result, group)
+                m.attach(pick.inp)
+                v.attach(pick.inp)
+            else:
+                base_kind = kind[:-1] if kind.endswith("k") else kind
+                test, flip = _CMP[base_kind]
+                diff = self.b.nl.net(GREEN, f"{name} difference")
+                copy(loops[0][c], diff)
+                if kind.endswith("k"):
+                    ones(diff, wrap(-k))
+                else:
+                    copy(loops[1][c], diff, -1)
+                cmp = Decider([Cond(Sig(EACH, frozenset({GREEN})), test, 0)], [Out(EACH, copy=False, constant=-1 if flip else 1)], label=name)
+                self.b.place(cmp, (), result, group)
+                diff.attach(cmp.inp)
+                if flip:
+                    ones(result, 1)
+            gate = Arithmetic(Sig(EACH, frozenset({GREEN})), "*", Sig(flag_signal, frozenset({RED})), EACH, label=f"{name} gate")
+            self.b.place(gate, (), self.bank(dst).loops[c], group)
+            result.attach(gate.inp)
+            flag.attach(gate.inp)
 
     def _clock(self) -> Net:
         """A counter that adds 1 every tick from the moment it is built; return its net."""
