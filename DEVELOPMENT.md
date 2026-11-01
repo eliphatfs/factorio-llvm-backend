@@ -81,7 +81,7 @@ Vector ops (`vadd` & co., see `factorio.h` and the `memory.py` docstring) are
 the destination's words and a gate puts the op's result onto its loops the
 same tick, chained from the block's gate flag (`cfg._emit_vector`). A block
 splits before a vector op whose sources it already wrote, as before a load;
-`vshift`s by one `k` share a rename network and go out a step apart.
+`vshift` renames each word of its source (one network per source and `k`).
 `vsum` / `vfirst` read like a load from a fixed address. `vfirst` uses the
 selector combinator (`netlist.Selector`, "select input", smallest first).
 

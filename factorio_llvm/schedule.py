@@ -120,6 +120,7 @@ class Store:
     enable: Lowered | None = None  # E to send when guarded: array id (or -id) if the guard holds, else 0
     delay: int | None = None  # pipelined loop: ticks after its iteration starts, not a step
     vector: tuple | None = None  # a clear that writes a vector op's result: (kind, source arrays, constant)
+    vcode: int = 0  # its E code instead of -array id (see Memory.vector)
 
 
     def __str__(self) -> str:
