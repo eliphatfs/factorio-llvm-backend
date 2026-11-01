@@ -195,7 +195,9 @@ class _Router:
     def _relay(self, a: Connector, b: Connector, net: Net) -> None:
         # A screen's lamps are all joined by short wires, so the relay may
         # start from whichever lamp of the net is nearest a free substation.
-        froms = [m for m in net.members if m.entity.group == FIXED] if a.entity.group == FIXED else [a]
+        # Only lamps: other FIXED members (the logic beside a screen) are not
+        # joined to each other, so starting from one would leave a split net.
+        froms = [m for m in net.members if isinstance(m.entity, Lamp)] if isinstance(a.entity, Lamp) else [a]
         start_at: dict[int, Connector] = {}
         for m in froms:
             for i, p in enumerate(self.poles):
@@ -236,7 +238,7 @@ class _Router:
             if d <= min(_reach(a.entity), _reach(b.entity)):
                 if a != b:
                     self.wires.append(WireSeg(net.color, a, b))
-            elif b.entity.group == FIXED:
+            elif isinstance(b.entity, Lamp):
                 self._relay(b, a, net)
             else:
                 self._relay(a, b, net)
