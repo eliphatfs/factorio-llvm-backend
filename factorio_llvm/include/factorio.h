@@ -75,6 +75,8 @@ static inline int ticks(void) { return factorio_clock[0]; }
  *   vlt / vle / vgt / vge / veq / vne(d, a, b)  d[i] = a[i] < b[i] (0 or 1), ...
  *   vltk ... vnek(d, a, k)                     d[i] = a[i] < k, ...
  *   vsum(a)         the sum of all words
+ *   vfirst(a)       the lowest index i with a[i] != 0, or -1 (a selector
+ *                   combinator; about 7 ticks, 9 past 395 words)
  * k is a compile-time constant. Comparisons compute a[i] - b[i], so they are
  * wrong if that overflows. d may be one of the sources. Not for I/O arrays.
  */
@@ -86,6 +88,7 @@ FV_DECL2_(add) FV_DECL2_(sub) FV_DECL2_(sel) FV_DECL2_(lt) FV_DECL2_(le) FV_DECL
 FV_DECLK_(shift) FV_DECLK_(addk) FV_DECLK_(mulk) FV_DECLK_(andk) FV_DECLK_(shlk) FV_DECLK_(shrk)
 FV_DECLK_(ltk) FV_DECLK_(lek) FV_DECLK_(gtk) FV_DECLK_(gek) FV_DECLK_(eqk) FV_DECLK_(nek)
 int __fv_sum(const int *, int);
+int __fv_first(const int *, int);
 #else /* native builds (tests): plain loops */
 #define FV_DEF2_(k, e) static inline void __fv_##k(int *d, const int *a, const int *b, int n) { for (int i = 0; i < n; i++) d[i] = (e); }
 #define FV_DEFK_(k, e) static inline void __fv_##k(int *d, const int *a, int c, int n) { for (int i = 0; i < n; i++) d[i] = (e); }
@@ -102,6 +105,7 @@ FV_DEFK_(addk, (int)((unsigned)a[i] + (unsigned)c)) FV_DEFK_(mulk, (int)((unsign
 FV_DEFK_(andk, a[i] & c) FV_DEFK_(shlk, (int)((unsigned)a[i] << (c & 31))) FV_DEFK_(shrk, a[i] >> (c & 31))
 FV_DEFK_(ltk, a[i] < c) FV_DEFK_(lek, a[i] <= c) FV_DEFK_(gtk, a[i] > c)
 FV_DEFK_(gek, a[i] >= c) FV_DEFK_(eqk, a[i] == c) FV_DEFK_(nek, a[i] != c)
+static inline int __fv_first(const int *a, int n) { for (int i = 0; i < n; i++) if (a[i]) return i; return -1; }
 static inline int __fv_sum(const int *a, int n) { unsigned s = 0; for (int i = 0; i < n; i++) s += (unsigned)a[i]; return (int)s; }
 #endif
 #define vadd(d, a, b) __fv_add(d, a, b, FV_N_(d))
@@ -126,6 +130,7 @@ static inline int __fv_sum(const int *a, int n) { unsigned s = 0; for (int i = 0
 #define veqk(d, a, k) __fv_eqk(d, a, k, FV_N_(d))
 #define vnek(d, a, k) __fv_nek(d, a, k, FV_N_(d))
 #define vsum(a) __fv_sum(a, FV_N_(a))
+#define vfirst(a) __fv_first(a, FV_N_(a))
 
 #if defined(SCREEN_W) && defined(SCREEN_H)
 extern volatile int screen[SCREEN_H * SCREEN_W];

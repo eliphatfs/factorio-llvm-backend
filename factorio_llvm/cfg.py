@@ -177,6 +177,9 @@ class _CfgLowerer(_Lowerer):
         if op.opcode == "vsum":
             assert self.mem is not None
             return self.mem.sum_result(op.args[0], op.text)
+        if op.opcode == "vfirst":
+            assert self.mem is not None
+            return self.mem.first_result(op.args[0], op.text)
         if op.opcode == "clear":
             assert self.mem is not None
             arr = op.args[0]

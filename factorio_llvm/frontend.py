@@ -338,12 +338,12 @@ def read_function(ir_text: str, name: str | None = None) -> Function:
                 kind = vm.group(1)
                 vargs0 = [operand(r, text) for r in refs[:-1]]
                 varrays = [a for a in vargs0 if isinstance(a, Array)]
-                if kind == "sum":
+                if kind in ("sum", "first"):
                     if len(vargs0) != 2 or not isinstance(vargs0[0], Array):
                         raise Unsupported(f"vsum needs a whole array: {text}")
                     if vargs0[0].external:
                         raise Unsupported(f"vector ops on I/O arrays are not supported: {text}")
-                    block.ops.append(Op("vsum", [vargs0[0]], values[_key(ins)], text=text))
+                    block.ops.append(Op("v" + kind, [vargs0[0]], values[_key(ins)], text=text))
                     continue
                 if kind not in VECTOR_KINDS:
                     raise Unsupported(f"unknown vector op __fv_{kind}: {text}")
@@ -442,7 +442,7 @@ def _point_to_arrays(fn: Function) -> None:
 
 
 def _array_of(op: Op) -> Array | None:
-    ptr = op.args[0] if op.opcode in ("load", "clear", "vsum") else op.args[1]
+    ptr = op.args[0] if op.opcode in ("load", "clear", "vsum", "vfirst") else op.args[1]
     return ptr if isinstance(ptr, Array) else getattr(ptr, "array", None)
 
 
@@ -506,7 +506,7 @@ def split_after_stores(fn: Function) -> Function:
             return [w for w in written if arr is None or w[0] is None or w[0] is arr]
 
         def must_split(op: Op) -> bool:
-            if op.opcode in ("load", "vsum"):
+            if op.opcode in ("load", "vsum", "vfirst"):
                 return bool(mine(op))
             # A vector op reads its source arrays (whole) like a load.
             srcs = vector_sources(op)

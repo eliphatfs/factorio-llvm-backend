@@ -87,7 +87,7 @@ from .frontend import Unsupported
 from .layout import screen_poles
 from .lower import Lowered, Wire, _Builder, _early, _reads, _vary
 from .sim import wrap
-from .netlist import GREEN, RED, Color, Arithmetic, Cond, Constant, Decider, Gate, Lamp, Net, Out, Pole, Sig, Wall
+from .netlist import GREEN, RED, Color, Arithmetic, Cond, Constant, Decider, Selector, Gate, Lamp, Net, Out, Pole, Sig, Wall
 from .signals import EACH, allocatable_signals
 
 ADDRESS = "signal-A"
@@ -182,12 +182,55 @@ class Memory:
         self.banks = {id(a): _Bank(a, i + 1) for i, a in enumerate(arrays)}
         self.vectors: list[tuple] = []  # (dst, kind, sources, k, flag net, flag signal, label)
         self.sums: dict[int, Net] = {}  # array id -> the net with its vsum
+        self.firsts: dict[int, Net] = {}  # array id -> the net with its vfirst
         self.shifters: dict[tuple[int, int], tuple[list[Net], list[Net]]] = {}  # (k, size) -> in, out nets per chunk
 
     def vector(self, dst: Array, kind: str, srcs: list[Array], k: int | None, flag: Net, flag_signal: str, label: str, early: Net | None = None) -> None:
         """A vector op's per-chunk networks, placed by build() once the loops exist.
         ``early`` (vshift) carries the flag 2 ticks before ``flag``."""
         self.vectors.append((dst, kind, srcs, k, flag, flag_signal, label, early))
+
+    def first_result(self, a: Array, label: str) -> Wire:
+        """``vfirst(a)``: the lowest index of a non-zero word, or -1. Per chunk,
+        an Each decider puts address + 1 of every non-zero word on a net and a
+        selector picks the smallest; with several chunks, each chunk's pick is
+        renamed to a signal of its own and a second selector picks again."""
+        if id(a) not in self.firsts:
+            self.firsts[id(a)] = self.b.nl.net(GREEN, f"{a.name} first")
+        out = self.b.local_signal()
+        rename = Arithmetic(Sig(VALUE, frozenset({GREEN})), "+", 0, out, label=f"{label} (first)")
+        self.b.place(rename, (), GREEN)
+        self.firsts[id(a)].attach(rename.inp)
+        lat = 4 if a.size <= CHUNK else 6  # loop -> mask, selector, rename(, selector, rename) -> block copy
+        return Wire(out, max(LOAD_LATENCY, lat + 3), early=_early(0) + lat + 3, vary=_vary(0) + lat + 3, reads=((a.name, lat, lat),))
+
+    def _first(self, bank: _Bank, group: str) -> None:
+        a = bank.array
+        result = self.firsts[id(a)]
+        result.attach(self.b.place(Constant({VALUE: -1}, label=f"{a.name} first: -1"), (), None, group).out)
+        many = len(bank.loops) > 1
+        picks = self.b.nl.net(GREEN, f"{a.name} first picks") if many else None
+        for c, base in enumerate(range(0, a.size, CHUNK)):
+            words = list(zip(_CHUNK_SIGNALS, a.init[base : base + CHUNK]))
+            key = self._key(a, base, words, group, RED)
+            masked = self.b.nl.net(GREEN, f"{a.name}[{base}..] first keys")
+            m = Decider([Cond(Sig(EACH, frozenset({GREEN})), "!=", 0)], [Out(EACH, networks=RED)], label=f"{a.name}[{base}..] first mask")
+            self.b.place(m, (), masked, group)
+            bank.loops[c].attach(m.inp)
+            key.attach(m.inp)
+            picked = self.b.nl.net(GREEN, f"{a.name}[{base}..] first pick")
+            self.b.place(Selector(False, 0, label=f"{a.name}[{base}..] first"), (), picked, group)
+            masked.attach(self.b.nl.entities[-1].inp)
+            rn = Arithmetic(Sig(EACH, frozenset({GREEN})), "+", 0, _CHUNK_SIGNALS[c] if many else VALUE, label=f"{a.name}[{base}..] first (rename)")
+            self.b.place(rn, (), picks if many else result, group)
+            picked.attach(rn.inp)
+        if many:
+            both = self.b.nl.net(GREEN, f"{a.name} first of chunks")
+            sel = self.b.place(Selector(False, 0, label=f"{a.name} first of chunks"), (), both, group)
+            picks.attach(sel.inp)
+            rn = Arithmetic(Sig(EACH, frozenset({GREEN})), "+", 0, VALUE, label=f"{a.name} first (rename)")
+            self.b.place(rn, (), result, group)
+            both.attach(rn.inp)
 
     def _shifter(self, k: int, size: int, group: str) -> tuple[list[Net], list[Net]]:
         """The rename network of every vshift by ``k`` of ``size``-word arrays:
@@ -397,6 +440,8 @@ class Memory:
                     summer = Arithmetic(Sig(EACH, frozenset({GREEN})), "+", 0, VALUE, label=f"{a.name}[{c * CHUNK}..] sum")
                     self.b.place(summer, (), self.sums[id(a)], group)
                     loop.attach(summer.inp)
+            if id(a) in self.firsts:
+                self._first(bank, group)
             # Readers port by port, each with its own copy of the chunk's key,
             # so a port's nets stay short and only the chunk loops reach across.
             for j, port in enumerate(bank.ports):

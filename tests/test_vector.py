@@ -18,6 +18,7 @@ INCLUDE = Path(__file__).parent.parent / "factorio_llvm" / "include"
 
 SRC = r"""
 #include <factorio.h>
+#include <string.h>
 int big[800], big2[800];
 #define N 9
 int a[N], b[N], d[N];
@@ -57,6 +58,21 @@ int t_shift_chunks(int x, int y) {
     for (int i = 0; i < 800; i += 7) big[i] = i * x + y;
     vshift(big2, big, 395); vshift(big, big2, -400);
     return big2[0] * 10000 + big2[3] * 100 + big[399] + big[402] * 3 + big[799] * 5;
+}
+int t_first(int x, int y) {
+    fill(x, y);
+    vnek(d, a, 0); int s = vfirst(d);
+    vsel(d, d, d); d[s < 0 ? 0 : s] = 0; s = s * 100 + vfirst(d);
+    memset(d, 0, sizeof d); s = s * 100 + vfirst(d);
+    for (int i = 0; i < 800; i++) big[i] = 0;
+    big[700 - x] = 1; big[790] = 1; if (y > 0) big[3 + y] = 2;
+    return s * 1000 + vfirst(big);
+}
+int t_drain(int x, int y) { /* pull every set word out in order */
+    fill(x, y); vnek(d, b, 0);
+    int h = 0, i;
+    while ((i = vfirst(d)) >= 0) { h = h * 13 + i; d[i] = 0; }
+    return h;
 }
 int t_chunks(int x, int y) {
     for (int i = 0; i < 800; i += 13) big[i] = i * x - y;
@@ -108,3 +124,17 @@ def test_vector_op_is_constant_time(build):
 def test_blueprint_exports(build):
     c = lower(read_function(build[0], "t_vle"))
     assert import_string(export_string(c.netlist))
+
+
+def test_selector_round_trip(build):
+    from factorio_llvm.cfg import STEP
+    from factorio_llvm.sim import Simulator
+
+    c = lower(read_function(build[0], "t_drain"))
+    want = c.run(3, 4)
+    back = import_string(export_string(c.netlist))
+    sim = Simulator(back)
+    bus = next(e for e in back.entities if e.position == c.bus.entity.position).out
+    sim.run_until(lambda s: s.read(bus, STEP) == c.halt)
+    sim.step()
+    assert sim.read(bus, c.result) == want
