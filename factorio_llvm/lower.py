@@ -153,13 +153,14 @@ class _Builder:
             (out if isinstance(out, Net) else self.net_of(out)).attach(e.out)
         return e
 
-    def tag(self, terminal: Connector, text: str, icon: str, group: str | None = None) -> None:
+    def tag(self, terminal: Connector, text: str, icon: str, group: str | None = None) -> Panel:
         """A display panel naming ``terminal``, on a green wire so it is placed next to it."""
         # A wired panel shows only its messages, so give it one that always holds
         # (signal-dot is never on the wire, so it reads 0).
         always = Message(Cond(Sig("signal-dot", frozenset({GREEN})), "=", 0), icon, text)
         panel = self.place(Panel([always], text=text, icon=icon, always_show=True, label=text), group=group)
         self.nl.net(GREEN, f"tag {text}").attach(terminal, panel.inp)
+        return panel
 
 
 def _operand(v: Lowered) -> Sig | int:

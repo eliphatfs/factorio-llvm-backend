@@ -87,7 +87,10 @@ run; switch it on and off again to rerun. Argument values sit in constant
 combinators; change them in game before rerunning. When the program halts, the
 **OUTPUT** terminal (an empty constant combinator to wire your factory to)
 carries the result and `signal-check = 1`, and a display panel shows reset,
-running or done.
+running or done. With a lamp screen, these controls sit in one row right under
+the screen's bottom-left corner: the status panel, then RESET, OUTPUT, the
+INPUT terminals and the arguments, each with its display panel directly above
+it.
 
 Straight-line functions have no `RESET`: change the argument constants and the
 result follows after the printed latency.

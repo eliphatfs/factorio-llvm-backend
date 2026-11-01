@@ -67,3 +67,17 @@ def test_huge_screen_routes():
     assert check_reach(back) == []
     dead = w * h - sum(isinstance(e, Lamp) and bool(e.rgb) for e in c.netlist.entities)
     assert dead == 4 * 5 * 3  # inside poles: 5 columns x 3 rows
+
+
+def test_controls_sit_under_the_screen():
+    """Status, RESET, OUTPUT and arguments in a row under the screen, each
+    terminal right under its tag panel; the circuit starts below them."""
+    c = lower(read_function(_program(30, 30), "draw"), screen_width=30)
+    back = import_string(export_string(c.netlist))
+    assert check_reach(back) == []
+    row = sorted((e.position, type(e).__name__) for e in back.entities if 0 < e.position[1] < 2 and e.position[0] > 0)
+    panels = {p[0] for p, kind in row if kind == "Panel" and p[1] == 0.5}
+    consts = {p[0] for p, kind in row if kind == "Constant" and p[1] == 1.5}
+    assert consts and consts <= panels  # every terminal has a panel right above it
+    assert c.reset.position == (3.5, 1.5)
+    assert min(e.position[1] for e in c.netlist.entities if e.group not in ("screen", "power")) >= 0
