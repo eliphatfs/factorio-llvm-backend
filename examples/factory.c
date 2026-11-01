@@ -265,7 +265,7 @@ static inline int neighbour(int t, int d) {
     return x >= 0 && x < TW && y >= 0 && y < TH - 1 ? y * TW + x : OFF;
 }
 
-static inline void build(int t, int k, int d) {
+__attribute__((always_inline)) static inline void build(int t, int k, int d) {
     int old = kind[t];
     if (old == CHEST) return;
     if (old != k) {
