@@ -129,6 +129,14 @@ Start with `#include <factorio.h>` (found automatically). It declares:
   reads an input sees one consistent value even if it changes mid-block (it
   may be the value from up to a block ago, but costs no extra ticks).
 - **`ticks()`**, a free-running game-tick counter.
+- **Vector ops.** `vadd(d, a, b)`, `vsub`, `vsel`, comparisons (`vlt` ..
+  `vne`), ops with a constant (`vaddk`, `vmulk`, `vandk`, `vshlk`, `vshrk`,
+  `vltk` .. `vnek`), `vshift(d, a, k)` (`d[i] = a[i + k]`), `vsum(a)` and
+  `vfirst(a)` (lowest non-zero index, or -1) work on whole arrays at once,
+  in a fixed number of ticks (about 5 a block of them) whatever the length:
+  every word of an array is on its memory loop at the same time. They cost
+  combinators instead, a few per op per 395 words (`vshift` one per word,
+  shared by all shifts by one `k`). See `include/factorio.h`.
 
 ### Examples
 
@@ -149,7 +157,9 @@ and places belts and inserters. Two input terminals steer it, `walk` (0 stop,
 per setting to paste onto them. Redrawing a tile costs 24 ticks (all rows of
 all changed tiles run as one pipelined loop), so the first full screen takes
 about 19,000 ticks (5 minutes) and a frame then takes about 300 to 450 ticks
-on a 64x48 build. It exports in about 1.5 minutes.
+on a 64x48 build. It exports in about 1.5 minutes. Belts run as vector ops
+(`BELT_STEP`), about 31 ticks per direction that has belts plus 19 per plate
+that moves, however many belts there are.
 
 ## Credits
 
