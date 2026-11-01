@@ -26,7 +26,7 @@
    python -m factorio_llvm examples/factory.c -f game --args 1000000000 --no-sim \
        --io walk=signal-W --io hold=signal-H */
 #ifndef TW
-#define TW 32           /* tiles per row (a power of two) */
+#define TW 32           /* tiles per row */
 #define TH 24           /* tile rows; the last one is the toolbar */
 #endif
 #define SCREEN_W (TW * 8)
@@ -270,7 +270,7 @@ static inline void unlist(int t) {
 /* Put `k` (BELT, INSERTER or EMPTY) facing `d` on tile t. */
 /* The tile next to t in direction d, or OFF past the edge of the field. */
 static inline int neighbour(int t, int d) {
-    int x = (t & (TW - 1)) + step_x(d), y = t / TW + step_y(d);
+    int ty = t / TW, x = t - ty * TW + step_x(d), y = ty + step_y(d);
     return x >= 0 && x < TW && y >= 0 && y < TH - 1 ? y * TW + x : OFF;
 }
 
@@ -329,7 +329,7 @@ __attribute__((always_inline)) static inline void build(int t, int k, int d) {
    toolbar frame. Directional sprites are drawn facing east and rotated. */
 static inline void draw_row(int r, int ex, int ey, int epose, int tool) {
     int t = dirty[r >> 3], y = r & 7;
-    int tx = t & (TW - 1), ty = t / TW;
+    int ty = t / TW, tx = t - ty * TW;
     int k = kind[t], d = dir[t], it = item[t] | plate[t];
     /* Table lookups rather than if/else chains, so this is one block and
        the loop over all rows of all redrawn tiles pipelines. */
