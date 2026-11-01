@@ -71,7 +71,7 @@ static inline int ticks(void) { return factorio_clock[0]; }
  *   vandk(d, a, k)  d[i] = a[i] & k           vshlk / vshrk  d[i] = a[i] << k, >> k
  *   vsel(d, m, a)   d[i] = m[i] ? a[i] : 0
  *   vshift(d, a, k) d[i] = a[i + k], 0 past either end (costs one combinator
- *                   per word for each k used, shared by all vshifts by k)
+ *                   per word for each source array and k, shared by its vshifts)
  *   vlt / vle / vgt / vge / veq / vne(d, a, b)  d[i] = a[i] < b[i] (0 or 1), ...
  *   vltk ... vnek(d, a, k)                     d[i] = a[i] < k, ...
  *   vsum(a)         the sum of all words

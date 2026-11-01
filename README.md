@@ -135,8 +135,8 @@ Start with `#include <factorio.h>` (found automatically). It declares:
   `vfirst(a)` (lowest non-zero index, or -1) work on whole arrays at once,
   in a fixed number of ticks (about 5 a block of them) whatever the length:
   every word of an array is on its memory loop at the same time. They cost
-  combinators instead, a few per op per 395 words (`vshift` one per word,
-  shared by all shifts by one `k`). See `include/factorio.h`.
+  combinators instead, a few per op per 395 words (`vshift` one per word
+  per source array and `k`). See `include/factorio.h`.
 
 ### Examples
 

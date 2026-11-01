@@ -516,8 +516,6 @@ def split_after_stores(fn: Function) -> Function:
             """One step after every earlier store of this piece it may overwrite."""
             if op.opcode == "clear":
                 clash = mine(op)
-                if op.predicate == "shift":  # vshifts by one k share a network: one a step
-                    clash += [(None, None, o.wave) for o in piece.ops if o is not op and o.predicate == "shift" and o.args[-1] == op.args[-1]]
             else:
                 addr = _affine(op.args[1], defs)
                 clash = [w for w in mine(op) if w[1] is None or w[1][0] != addr[0] or w[1][1] == addr[1]]
