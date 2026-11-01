@@ -343,7 +343,8 @@ int game(int frames) {
         int nx = ex + dx, ny = ey + dy;
         nx = nx < 0 ? 0 : nx >= TW ? TW - 1 : nx;
         ny = ny < 0 ? 0 : ny >= TH - 1 ? TH - 2 : ny;
-        if (kind[ny * TW + nx] == CHEST) { /* chests block the way */
+        int blocked = kind[ny * TW + nx] == CHEST;
+        if (blocked) { /* chests block the way */
             nx = ex;
             ny = ey;
         }
@@ -364,6 +365,12 @@ int game(int frames) {
             mark(ny * TW + nx);
             ex = nx;
             ey = ny;
+        } else if (blocked && tool != T_HAND) {
+            /* Walking into a chest builds on the engineer's own tile, facing
+               the chest: how to put an inserter (or a belt) into one. */
+            int t = ey * TW + ex, k = tool_kind[tool], d = walk_dir[w];
+            if (kind[t] != k || dir[t] != d)
+                build(t, k, d);
         }
 
         /* 2. inserters: grab from behind, drop in front */
