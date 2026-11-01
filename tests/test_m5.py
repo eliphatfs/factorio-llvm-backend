@@ -59,7 +59,7 @@ def test_big_array_is_chunked(build):
     ir, _ = build
     c = lower(read_function(ir, "chunks"))
     names = [n.name for n in c.netlist.logical]
-    assert {"big[0..]", "big[395..]", "big[790..]"} <= set(names)
+    assert {"big[0..]", "big[394..]", "big[788..]"} <= set(names)
 
 
 @pytest.mark.parametrize("name,arg,want", [("squares", 5, 85664), ("scatter", 3, 992), ("chunks", 2, 12142)])

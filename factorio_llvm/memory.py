@@ -1,6 +1,6 @@
 """Fixed-size arrays (M3): chunked "each" memories, read ports, bus writes.
 
-Chunks. An array is cut into chunks of CHUNK words (every usable signal, 395).
+Chunks. An array is cut into chunks of CHUNK words (every usable signal, 394).
 Word ``i`` is signal ``sigs[i % CHUNK]`` of chunk ``i // CHUNK``; external
 arrays use their I/O signals, so they are one chunk. Each chunk has:
 
@@ -11,7 +11,7 @@ arrays use their I/O signals, so they are one chunk. Each chunk has:
 - a *cell* decider on the loop: each word passes unless masked;
 - a *key gate*: passes the key on only while the bus holds a
   store to this chunk (``E == array id`` and ``A`` in its range), a clear or
-  reset, so the mask scans an empty net on idle ticks (a 395-signal each scan
+  reset, so the mask scans an empty net on idle ticks (a 394-signal each scan
   every tick per chunk and port was most of the game's update time);
 - a *write mask* decider on the gated key and the bus a tick late:
   ``each(key) == A`` and ``E == array id`` (a store), or ``E == -array id``
@@ -58,7 +58,7 @@ Screen. A written extern array whose name starts with ``screen`` is a
 display instead: a grid of lamps (``screen_width`` wide, any size), each
 showing its word as a packed 0xRRGGBB colour. The grid sits above the rest of
 the layout. Each chunk's lamps are one block on that chunk's loop (they reuse
-the same 395 signals): lamps wire to their neighbours, and the router takes the
+the same 394 signals): lamps wire to their neighbours, and the router takes the
 block out through the ring of substations around the screen. Substations
 inside the screen, only where power needs them, take 2x2 lamps each.
 """
@@ -154,7 +154,7 @@ class Memory:
     def _gate(self, key_net: Net, conds: list[Cond], label: str, group: str) -> Net:
         """Pass the chunk's key on only while ``conds`` hold (a store or load
         that may touch the chunk). Masks are each-deciders over the key: fed
-        a constant 395-signal key they scan it every tick (a screen has 16
+        a constant 394-signal key they scan it every tick (a screen has 16
         ports x 125 chunks of them, most of the game's update time); behind the gate they scan an empty net."""
         out = self.b.nl.net(RED, label)
         gate = Decider(conds, [Out(EVERYTHING, networks=key_net.color)], label=label)

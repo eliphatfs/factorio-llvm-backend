@@ -31,7 +31,7 @@ M0 (infrastructure), M1 (straight-line functions), M2 (control flow), M3 (arrays
 | `factorio_llvm/sim.py` | Tick-accurate simulator: wire sums, int32 wrap, one tick per combinator |
 | `factorio_llvm/blueprint.py` | Blueprint string export and import |
 | `factorio_llvm/components.py` | Step counter and bus register building blocks |
-| `factorio_llvm/signals.py` | The 395 base-game signals, from Factorio 2.1.24 |
+| `factorio_llvm/signals.py` | The 394 base-game signals, from Factorio 2.1.24 |
 | `factorio_llvm/frontend.py` | Reads LLVM IR with llvmlite (or C via clang) into a small dataflow IR |
 | `factorio_llvm/lower.py` | Lowers a single-block i32 function to a combinator pipeline |
 | `factorio_llvm/cfg.py` | Lowers functions with branches and loops to a stepped circuit |
@@ -43,7 +43,7 @@ M1 supports one basic block of i1/i32 code: `add sub mul sdiv srem shl ashr lshr
 and or xor`, every `icmp` predicate, `select`, `zext/sext/trunc` between i1 and
 i32, and the `smax smin umax umin abs` intrinsics. Values are named per basic block on
 the block's own green net; only registers, arguments and the step signal share
-the red bus. So the 395-signal limit applies to one block, and to the number of
+the red bus. So the 394-signal limit applies to one block, and to the number of
 values kept across blocks, not to the whole function. Tests compare
 the simulated circuit with the same C compiled natively.
 
@@ -64,7 +64,7 @@ and closed-form loop exit values (`factorio_llvm.frontend.CLANG_FLAGS`).
 M3 supports fixed-size `i32` arrays: local (`alloca`) or global, with or
 without initial values, and constant globals as ROM tables. `getelementptr`,
 `load`, `store` and `memset` of a whole array to 0 are handled; i64 is accepted
-for indices and computed in 32 bits. Arrays are stored in chunks of 395 words (one per
+for indices and computed in 32 bits. Arrays are stored in chunks of 394 words (one per
 usable signal) on a private loop: a chunk costs about 5 combinators and each
 read port 2 more per chunk, whatever its size, and a load costs 5 ticks on top
 of its address. Each store in a block gets its own write port, so
@@ -110,7 +110,7 @@ the next read. `run()` steps `WARM_UP` ticks in reset so the snapshot is
 filled before the program starts; tests/test_io.py flips an input at every
 tick of a block to check it.
 
-A screen's memory chunks (395 lamps each) are placed in strips beside the
+A screen's memory chunks (394 lamps each) are placed in strips beside the
 screen, level with their lamps (`Memory._beside_screen`), so each chunk's loop
 stays local. Before, every chunk's loop had to leave the screen through the
 ring of substations, which carry one net per colour each, and beyond about 30

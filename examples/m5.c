@@ -2,8 +2,8 @@
  *
  * A block's stores go out together on separate write ports when their
  * addresses provably differ (i, i + 1, ...: what `#pragma unroll` produces),
- * and its loads use separate read ports. Arrays larger than 395 words are
- * split into chunks of 395. */
+ * and its loads use separate read ports. Arrays larger than 394 words are
+ * split into chunks of 394. */
 
 int sq[64];
 
@@ -40,7 +40,7 @@ int scatter(int k) {
 
 int big[1000];
 
-/* Big array: 1000 words in 3 chunks (395 + 395 + 210). Writes a stride-7
+/* Big array: 1000 words in 3 chunks (394 + 394 + 212). Writes a stride-7
  * pattern across all of them and reads back words from each chunk
  * (0 in chunk 0, 399 in chunk 1, 791 and 994 in chunk 2). */
 int chunks(int n) {
