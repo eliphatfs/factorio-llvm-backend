@@ -343,6 +343,10 @@ int game(int frames) {
         int nx = ex + dx, ny = ey + dy;
         nx = nx < 0 ? 0 : nx >= TW ? TW - 1 : nx;
         ny = ny < 0 ? 0 : ny >= TH - 1 ? TH - 2 : ny;
+        if (kind[ny * TW + nx] == CHEST) { /* chests block the way */
+            nx = ex;
+            ny = ey;
+        }
         /* The engineer's tile is redrawn only when they move, turn or stop,
            so standing still costs nothing. */
         int nface = w >= 1 && w <= 4 ? walk_dir[w] : face;
