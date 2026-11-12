@@ -187,7 +187,8 @@ class _CfgLowerer(_Lowerer):
             port = sum(1 for s in self.stores if s.wave == op.wave)
             self.mem.write_port(arr, port)
             aid = self.mem.bank(arr).id
-            st = Store(0, arr.name, aid, clear=True, port=port, wave=op.wave, enable=self._enable(op, -aid))
+            vcode = self.mem.vector_code() if op.predicate is not None else 0
+            st = Store(0, arr.name, aid, clear=True, port=port, wave=op.wave, enable=self._enable(op, -vcode if vcode else -aid), vcode=vcode)
             if op.predicate is not None:  # a vector op: the clear also lets its result in
                 srcs = [a for a in op.args[1:] if isinstance(a, Array)]
                 k = next((a for a in op.args[1:] if isinstance(a, int)), None)
@@ -380,7 +381,7 @@ class _CfgLowerer(_Lowerer):
             self._gated_by = None
         sig_a, sig_v, sig_e = self.mem.write_signals[st.port]
         if st.clear:
-            e = st.enable if st.enable is not None else -st.array_id
+            e = st.enable if st.enable is not None else -(st.vcode or st.array_id)
             if e != 0:
                 self._gated(st.step, e, sig_e, self.b.bus, f"clear {st.array}")
             if st.vector is not None and e != 0:
@@ -394,32 +395,15 @@ class _CfgLowerer(_Lowerer):
                 self._gated(st.step, v, sig, self.b.bus, f"{label} ({sig})")
 
     def _emit_vector(self, st: Store, e: Lowered) -> None:
-        """A vector op's write: the clear (just emitted) drops the old words, and
-        its result goes onto the loop the same tick. The block's gate flag (on
-        the local net while S = step) starts a two-tick chain whose end lets the
-        result through for one tick (see Memory.vector)."""
+        """A vector op's write: its clear (just emitted, with E = -its code)
+        drops the old words, and its result goes onto the loop the same tick
+        (see Memory.vector)."""
         assert self.mem is not None
         if getattr(self, "_gated_by", None):
             raise Unsupported(f"vector op in a pipelined loop: {st}")
-        flag = self.gates[(id(self.b.local), st.step)]
-        conds = [Cond(Sig(flag, frozenset({GREEN})), "=", 1)]
-        ins = {GREEN}
-        if isinstance(e, Wire):  # guarded: only when the clear goes out
-            conds.append(Cond(Sig(e.signal, frozenset({e.color})), "=", -st.array_id))
-            ins.add(e.color)
-        n1 = self.b.nl.net(RED, f"{st.array} vector write {st.step} (1)")
-        n2 = self.b.nl.net(RED, f"{st.array} vector write {st.step} (2)")
-        self.b.place(Decider(conds, [Out(GATE, copy=False, constant=1)], label=f"{st}: start"), ins, n1)
-        hold = Arithmetic(Sig(GATE, frozenset({RED})), "+", 0, GATE, label=f"{st}: delay")
-        self.b.place(hold, (), n2)
-        n1.attach(hold.inp)
         kind, srcs, k = st.vector
         arr = next(a for a in self.fn.arrays if a.name == st.array)
-        early = None
-        if kind == "shift":  # its sources are sampled at S = step (see Memory._vector)
-            early = self.b.nl.net(RED, f"{st.array} vector feed {st.step}")
-            self.b.place(Decider([self._step_is(st.step - 1)], [Out(GATE, copy=False, constant=1)], label=f"{st}: feed"), (RED,), early)
-        self.mem.vector(arr, kind, srcs, k, n2, GATE, str(st), early)
+        self.mem.vector(arr, kind, srcs, k, st.vcode, st.port, str(st))
 
     def _emit_load(self, ld: Load, bs: BlockSchedule) -> None:
         assert self.mem is not None

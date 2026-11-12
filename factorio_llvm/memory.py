@@ -93,13 +93,14 @@ from .signals import EACH, allocatable_signals
 ADDRESS = "signal-A"
 VALUE = "signal-V"
 ENABLE = "signal-E"
+VECTOR_CODES = 100000  # vector ops' clears send E = -(this + n)
 LOAD_LATENCY = 5  # ticks from a settled address to the loaded value
 READ_TO_RESULT = 2  # the reader samples the chunk loop this many ticks before the loaded value is out
 STORE_LANDS = 3  # a store sampled at tick k is on the chunk loop from tick k + 3
 
 
 # ticks from the sources' loops to the gate's input
-_VECTOR_DEPTH = {"add": 1, "sub": 1, "addk": 1, "mulk": 1, "andk": 1, "shlk": 1, "shrk": 1, "sel": 2, "shift": 2}
+_VECTOR_DEPTH = {"add": 1, "sub": 1, "addk": 1, "mulk": 1, "andk": 1, "shlk": 1, "shrk": 1, "sel": 2, "shift": 1}
 
 
 def vector_depth(kind: str) -> int:
@@ -180,15 +181,24 @@ class Memory:
         # store in a block, so a block's stores go out together.
         self.write_signals: list[tuple[str, str, str]] = [(ADDRESS, VALUE, ENABLE)]
         self.banks = {id(a): _Bank(a, i + 1) for i, a in enumerate(arrays)}
-        self.vectors: list[tuple] = []  # (dst, kind, sources, k, flag net, flag signal, label)
+        self.vectors: list[tuple] = []  # (dst, kind, sources, k, code, port, label)
+        self.vector_clears: dict[tuple[int, int], list[int]] = {}  # (dst id, port) -> codes
+        self._codes = iter(range(1 << 20))
         self.sums: dict[int, Net] = {}  # array id -> the net with its vsum
         self.firsts: dict[int, Net] = {}  # array id -> the net with its vfirst
-        self.shifters: dict[tuple[int, int], tuple[list[Net], list[Net]]] = {}  # (k, size) -> in, out nets per chunk
+        self.shifters: dict[tuple[int, int], list[Net]] = {}  # (array id, k) -> shifted copy per chunk
 
-    def vector(self, dst: Array, kind: str, srcs: list[Array], k: int | None, flag: Net, flag_signal: str, label: str, early: Net | None = None) -> None:
-        """A vector op's per-chunk networks, placed by build() once the loops exist.
-        ``early`` (vshift) carries the flag 2 ticks before ``flag``."""
-        self.vectors.append((dst, kind, srcs, k, flag, flag_signal, label, early))
+    def vector_code(self) -> int:
+        """A fresh E code for a vector op's clear: past every array id."""
+        return VECTOR_CODES + next(self._codes)
+
+    def vector(self, dst: Array, kind: str, srcs: list[Array], k: int | None, code: int, port: int, label: str) -> None:
+        """A vector op's per-chunk networks, placed by build() once the loops
+        exist. Its clear goes out on write port ``port`` with E = -``code``:
+        the destination's write masks take that as a clear, and a decider next
+        to each gate takes it as the tick to let the result in."""
+        self.vectors.append((dst, kind, srcs, k, code, port, label))
+        self.vector_clears.setdefault((id(dst), port), []).append(code)
 
     def first_result(self, a: Array, label: str) -> Wire:
         """``vfirst(a)``: the lowest index of a non-zero word, or -1. Per chunk,
@@ -232,23 +242,22 @@ class Memory:
             self.b.place(rn, (), result, group)
             both.attach(rn.inp)
 
-    def _shifter(self, k: int, size: int, group: str) -> tuple[list[Net], list[Net]]:
-        """The rename network of every vshift by ``k`` of ``size``-word arrays:
-        word i + k of the input nets -> word i of the output nets, one
-        arithmetic combinator per word. The ops take turns (one a step)."""
-        key = (k, size)
+    def _shifter(self, src: Array, k: int, color: Color = RED) -> list[Net]:
+        """``src`` shifted by ``k``, always on: word i + k of its loops renamed
+        to word i on a red net per chunk, one arithmetic combinator per word,
+        placed with the array. Every vshift of ``src`` by ``k`` gates it."""
+        key = (id(src), k)
         if key not in self.shifters:
-            chunks = range(0, size, CHUNK)
-            ins = [self.b.nl.net(GREEN, f"vshift {k} of {size} in [{b}..]") for b in chunks]
-            outs = [self.b.nl.net(GREEN, f"vshift {k} of {size} out [{b}..]") for b in chunks]
-            for i in range(size):
+            loops = self.bank(src).loops
+            outs = [self.b.nl.net(color, f"{src.name} shifted {k} [{b}..]") for b in range(0, src.size, CHUNK)]
+            for i in range(src.size):
                 j = i + k
-                if not 0 <= j < size:
+                if not 0 <= j < src.size:
                     continue
-                e = Arithmetic(Sig(_CHUNK_SIGNALS[j % CHUNK], frozenset({GREEN})), "+", 0, _CHUNK_SIGNALS[i % CHUNK], label=f"vshift {k}: [{i}] <- [{j}]")
-                self.b.place(e, (), outs[i // CHUNK], f"vshift {k}")
-                ins[j // CHUNK].attach(e.inp)
-            self.shifters[key] = (ins, outs)
+                e = Arithmetic(Sig(_CHUNK_SIGNALS[j % CHUNK], frozenset({GREEN})), "+", 0, _CHUNK_SIGNALS[i % CHUNK], label=f"{src.name} shift {k}: [{i}] <- [{j}]")
+                self.b.place(e, (), outs[i // CHUNK], f"array {src.name}")
+                loops[j // CHUNK].attach(e.inp)
+            self.shifters[key] = outs
         return self.shifters[key]
 
     def sum_result(self, a: Array, label: str) -> Wire:
@@ -417,7 +426,9 @@ class Memory:
             joystick = self.joystick = self._joystick()
         if any(b.is_clock for b in self.banks.values()):
             self.clock = self._clock()
-        for bank in self.banks.values():
+        # Arrays with read ports first, next to the blocks that read them (their
+        # port nets are long); arrays only vector ops touch go last.
+        for bank in sorted(self.banks.values(), key=lambda b: not b.ports):
             a = bank.array
             group = f"array {a.name}"
             sigs = bank.io if a.external else _CHUNK_SIGNALS
@@ -453,74 +464,82 @@ class Memory:
         for v in self.vectors:
             self._vector(*v)
 
-    def _vector(self, dst: Array, kind: str, srcs: list[Array], k: int | None, flag: Net, flag_signal: str, label: str, early: Net | None) -> None:
+    def _vector(self, dst: Array, kind: str, srcs: list[Array], k: int | None, code: int, port: int, label: str) -> None:
+        """Per chunk: the op's first stage next to its sources (in their
+        groups), its result on a red net to the gate next to the destination.
+        Chunk loops are green, so the long links between arrays go on red and
+        the two colours share the substation channels."""
         group = f"array {dst.name}"
+        gsrc = [f"array {a.name}" for a in srcs]
         loops = [self.bank(a).loops for a in srcs]
+        # E = -code on the bus at step + 1 -> flag at step + 2 -> gate output at
+        # step + 3, the tick the write mask's cell drops the old words.
+        # Long links alternate colours, op by op, to share the substation channels.
+        col, other = (RED, GREEN) if code % 2 else (GREEN, RED)
         if kind == "shift":
-            assert early is not None and k is not None
-            ins, outs = self._shifter(k, dst.size, group)
-            for c in range(len(ins)):
-                # source chunk c -> the shared input, while this op samples
-                feed = Arithmetic(Sig(EACH, frozenset({GREEN})), "*", Sig(flag_signal, frozenset({RED})), EACH, label=f"{label} [{c * CHUNK}..] feed")
-                self.b.place(feed, (), ins[c], group)
-                loops[0][c].attach(feed.inp)
-                early.attach(feed.inp)
-                gate = Arithmetic(Sig(EACH, frozenset({GREEN})), "*", Sig(flag_signal, frozenset({RED})), EACH, label=f"{label} [{c * CHUNK}..] gate")
-                self.b.place(gate, (), self.bank(dst).loops[c], group)
-                outs[c].attach(gate.inp)
-                flag.attach(gate.inp)
-            return
+            col = self._shifter(srcs[0], k, col)[0].color
+            other = GREEN if col == RED else RED
+        flag = self.b.nl.net(other, f"{label} flag")
+        sig_e = self.write_signals[port][2]
+        self.b.place(Decider([Cond(Sig(sig_e, frozenset({RED})), "=", -code)], [Out(VALUE, copy=False, constant=1)], label=f"{label} flag"), (RED,), flag, group)
+        flag_signal = VALUE
         for c, base in enumerate(range(0, dst.size, CHUNK)):
             n = min(CHUNK, dst.size - base)
             sigs = _CHUNK_SIGNALS[:n]
             name = f"{label} [{base}..]"
-            result = self.b.nl.net(GREEN, f"{name} result")
+            if kind == "shift":
+                assert k is not None
+                result = self._shifter(srcs[0], k, col)[c]
+            else:
+                result = self.b.nl.net(col, f"{name} result")
 
-            def copy(loop: Net, net: Net, factor: int = 1) -> None:
+            def copy(i: int, net: Net, factor: int = 1) -> None:
                 e = Arithmetic(Sig(EACH, frozenset({GREEN})), "*", factor, EACH, label=f"{name} copy")
-                self.b.place(e, (), net, group)
-                loop.attach(e.inp)
+                self.b.place(e, (), net, gsrc[i])
+                loops[i][c].attach(e.inp)
 
-            def ones(net: Net, value: int) -> None:
+            def ones(net: Net, value: int, g: str) -> None:
                 if value:
-                    net.attach(self.b.place(Constant({s: value for s in sigs}, label=f"{name} constant"), (), None, group).out)
+                    net.attach(self.b.place(Constant({s: value for s in sigs}, label=f"{name} constant"), (), None, g).out)
 
-            if kind in ("add", "sub", "addk"):
-                copy(loops[0][c], result)
+            if kind == "shift":
+                pass
+            elif kind in ("add", "sub", "addk"):
+                copy(0, result)
                 if kind == "addk":
-                    ones(result, k)
+                    ones(result, k, gsrc[0])
                 else:
-                    copy(loops[1][c], result, 1 if kind == "add" else -1)
+                    copy(1, result, 1 if kind == "add" else -1)
             elif kind in _ARITH_K:
                 e = Arithmetic(Sig(EACH, frozenset({GREEN})), _ARITH_K[kind], k & 31 if kind in ("shlk", "shrk") else k, EACH, label=name)
-                self.b.place(e, (), result, group)
+                self.b.place(e, (), result, gsrc[0])
                 loops[0][c].attach(e.inp)
             elif kind == "sel":
                 m = self.b.nl.net(RED, f"{name} mask")
                 v = self.b.nl.net(GREEN, f"{name} values")
                 e = Arithmetic(Sig(EACH, frozenset({GREEN})), "+", 0, EACH, label=f"{name} mask copy")
-                self.b.place(e, (), m, group)
+                self.b.place(e, (), m, gsrc[0])
                 loops[0][c].attach(e.inp)
-                copy(loops[1][c], v)
+                copy(1, v)
                 pick = Decider([Cond(Sig(EACH, frozenset({RED})), "!=", 0)], [Out(EACH, networks=GREEN)], label=name)
-                self.b.place(pick, (), result, group)
+                self.b.place(pick, (), result, gsrc[0])
                 m.attach(pick.inp)
                 v.attach(pick.inp)
             else:
                 base_kind = kind[:-1] if kind.endswith("k") else kind
                 test, flip = _CMP[base_kind]
-                diff = self.b.nl.net(GREEN, f"{name} difference")
-                copy(loops[0][c], diff)
+                diff = self.b.nl.net(col, f"{name} difference")
+                copy(0, diff)
                 if kind.endswith("k"):
-                    ones(diff, wrap(-k))
+                    ones(diff, wrap(-k), gsrc[0])
                 else:
-                    copy(loops[1][c], diff, -1)
-                cmp = Decider([Cond(Sig(EACH, frozenset({GREEN})), test, 0)], [Out(EACH, copy=False, constant=-1 if flip else 1)], label=name)
-                self.b.place(cmp, (), result, group)
+                    copy(1, diff, -1)
+                cmp = Decider([Cond(Sig(EACH, frozenset({col})), test, 0)], [Out(EACH, copy=False, constant=-1 if flip else 1)], label=name)
+                self.b.place(cmp, (), result, gsrc[0])
                 diff.attach(cmp.inp)
                 if flip:
-                    ones(result, 1)
-            gate = Arithmetic(Sig(EACH, frozenset({GREEN})), "*", Sig(flag_signal, frozenset({RED})), EACH, label=f"{name} gate")
+                    ones(result, 1, gsrc[0])
+            gate = Arithmetic(Sig(EACH, frozenset({col})), "*", Sig(flag_signal, frozenset({other})), EACH, label=f"{name} gate")
             self.b.place(gate, (), self.bank(dst).loops[c], group)
             result.attach(gate.inp)
             flag.attach(gate.inp)
@@ -609,6 +628,8 @@ class Memory:
                 Cond(e, "=", bank.id),
                 Cond(e, "=", -bank.id, join="or"),
             ]
+            for code in self.vector_clears.get((id(a), p), ()):
+                conds.append(Cond(e, "=", -code, join="or"))
             if p == 0:
                 conds.append(Cond(s_red, "<=", 1, join="or"))
             # The cell reads every port's mask on one net; with several ports,
